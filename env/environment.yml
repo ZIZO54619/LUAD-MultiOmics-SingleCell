@@ -1,0 +1,14 @@
+name: moda-luad-multiomics
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy=1.26.4
+  - pandas
+  - scipy
+  - h5py
+  - scikit-learn
+  - jupyter
+  - pip:
+      - mofapy2

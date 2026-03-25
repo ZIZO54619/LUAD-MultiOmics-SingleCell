@@ -1,0 +1,493 @@
+---
+title: "MODA - Step 03 - Clinical Metadata Curation"
+author: "Abdulaziz"
+date: "2025-09-15"
+output: html_document
+---
+
+
+```{r}
+# حِزم خفيفة
+need <- c("data.table","janitor","ggplot2","stringr","arrow","knitr")
+inst <- need[!need %in% installed.packages()[,1]]
+if(length(inst)) install.packages(inst, repos="https://cloud.r-project.org")
+library(data.table); library(janitor); library(ggplot2); library(stringr); library(arrow); library(knitr)
+```
+
+
+```{r}
+source("R/workflow_utils.R")
+cfg <- load_moda_paths()
+base_dir <- cfg$external_project_dir
+raw_dir  <- cfg$external_raw_dir
+proc_dir <- cfg$external_processed_dir
+if (!dir.exists(raw_dir)) stop("Clinical raw-data directory not found. Update config/paths.yml.")
+if (!dir.exists(proc_dir)) stop("Processed data directory not found. Update config/paths.yml.")
+
+# حمّل مجموعة العينات المشتركة
+common_samples <- readRDS(file.path(proc_dir, "common_samples.rds"))
+```
+
+
+
+```{r}
+# util: توحيد IDs
+std_ids <- function(x){ x <- toupper(gsub("\\s+","", as.character(x))); gsub("[^A-Z0-9_-]","", x) }
+
+# اقرأ الـclinical كـ data.frame بسيط ونظّف أسماء الأعمدة
+clin_path <- list.files(raw_dir, pattern="(?i)^Clinical.*\\.txt$|\\.tsi\\.txt$", full.names=TRUE)[1]
+stopifnot(file.exists(clin_path))
+clinical_raw <- data.table::fread(clin_path, data.table=FALSE, na.strings=c("","NA","NaN"))
+names(clinical_raw) <- janitor::make_clean_names(names(clinical_raw))
+```
+
+
+```{r}
+# اختَر أفضل عمود يطابق عيناتنا كـ sample_id
+cands <- c("sample_id","sample","aliquot","aliquot_id","experimental_sample_id",
+           "case_id","subject_id","tumor_sample_barcode","biospecimen_id","sample_name")
+present <- intersect(cands, names(clinical_raw))
+scores  <- sapply(present, function(col) sum(std_ids(clinical_raw[[col]]) %in% std_ids(common_samples)))
+best_col <- if(length(present)) present[which.max(scores)] else NA
+stopifnot(!is.na(best_col))
+clinical_raw$sample_id <- std_ids(clinical_raw[[best_col]])
+
+# فلترة على العيّنات المشتركة + إصلاح قيم نصية شائعة
+clinical <- clinical_raw[clinical_raw$sample_id %in% std_ids(common_samples), , drop=FALSE]
+# خرّط بعض الأعمدة الشائعة لو موجودة
+if("tissue_type_0nat_1tumor" %in% names(clinical)){
+  clinical$type <- ifelse(clinical$tissue_type_0nat_1tumor %in% c(0,"0"), "NAT",
+                   ifelse(clinical$tissue_type_0nat_1tumor %in% c(1,"1"), "Tumor", as.character(clinical$tissue_type_0nat_1tumor)))
+}
+if("study_organization_0cptac_1icpc" %in% names(clinical)){
+  clinical$batch <- ifelse(clinical$study_organization_0cptac_1icpc %in% c(0,"0"), "CPTAC",
+                    ifelse(clinical$study_organization_0cptac_1icpc %in% c(1,"1"), "ICPC", as.character(clinical$study_organization_0cptac_1icpc)))
+}
+
+# حول كل فراغ/سلسلة "unknown/na" إلى NA
+to_na <- function(v){
+  v <- if(is.character(v)) trimws(v) else v
+  if(is.character(v)) v[v %in% c("NA","na","Na","N/A","Unknown","UNKNOWN","unknown","Not Reported","not_reported")] <- NA
+  v
+}
+clinical <- as.data.frame(lapply(clinical, to_na), stringsAsFactors = FALSE)
+
+# ملخّص سريع للأبعاد
+dim(clinical)
+
+```
+
+
+
+
+```{r}
+is_numeric_like <- function(v){
+  if(is.numeric(v)) return(TRUE)
+  w <- suppressWarnings(as.numeric(v))
+  ok <- sum(!is.na(w)) / length(w)
+  ok >= 0.9
+}
+
+miss_rate <- function(v) mean(is.na(v))
+
+# ابنِ الجدول
+cols <- setdiff(names(clinical), c("sample_id"))
+dict <- do.call(rbind, lapply(cols, function(nm){
+  v <- clinical[[nm]]
+  typ <- if(is_numeric_like(v)) "numeric" else "categorical"
+  nuniq <- length(unique(v[!is.na(v)]))
+  mr <- miss_rate(v)
+  top <- if(typ=="categorical"){
+    tbl <- sort(table(v), decreasing=TRUE)
+    paste(head(paste(names(tbl), as.integer(tbl), sep=":"), 5), collapse=" | ")
+  } else {
+    x <- suppressWarnings(as.numeric(v))
+    qs <- quantile(x, probs=c(0.05,0.5,0.95), na.rm=TRUE, names=FALSE)
+    paste0("p5=", round(qs[1],2), " | p50=", round(qs[2],2), " | p95=", round(qs[3],2))
+  }
+  data.frame(name=nm, type=typ, missing_rate=round(mr,3), unique_non_na=nuniq, preview=top, stringsAsFactors = FALSE)
+}))
+dict <- dict[order(dict$type, dict$missing_rate, -dict$unique_non_na), ]
+kable(head(dict, 20), caption="Data Dictionary (أول 20 عمود)")
+```
+
+
+
+
+```{r}
+# قواعد الاستبعاد
+is_batch_like <- function(nm) grepl("(batch|center|site|platform|acquisition|ms_run|study_organization)", nm, ignore.case=TRUE)
+is_id_like    <- function(nm) grepl("(id$|barcode|aliquot|uuid)", nm, ignore.case=TRUE)
+
+# ترشيح أوّلي
+cat_dict <- subset(dict, type=="categorical" & !is_batch_like(name) & !is_id_like(name))
+
+# حدود منطقية
+max_missing <- 0.20
+min_levels  <- 2
+max_levels  <- 6
+min_class_n <- 20
+
+check_min_class <- function(v){
+  v <- v[!is.na(v)]
+  if(length(unique(v)) < 2) return(0)
+  min(as.integer(table(v)))
+}
+
+cat_dict$min_class_n <- sapply(cat_dict$name, function(nm) check_min_class(clinical[[nm]]))
+shortlist <- subset(cat_dict,
+                    missing_rate <= max_missing &
+                    unique_non_na >= min_levels & unique_non_na <= max_levels &
+                    min_class_n >= min_class_n)
+
+# لو متغير type موجود ووافق الشروط، ضمنه في الأعلى
+if("type" %in% names(clinical)){
+  if(any(shortlist$name == "type") == FALSE){
+    v <- clinical$type
+    if(miss_rate(v) <= max_missing && length(unique(na.omit(v)))>=2 && check_min_class(v)>=min_class_n){
+      shortlist <- rbind(data.frame(name="type", type="categorical",
+                                    missing_rate=round(miss_rate(v),3),
+                                    unique_non_na=length(unique(na.omit(v))),
+                                    preview=paste(sort(table(v), decreasing=TRUE)[1:2], collapse=" | "),
+                                    min_class_n=check_min_class(v),
+                                    stringsAsFactors = FALSE),
+                         shortlist)
+    }
+  }
+}
+
+kable(shortlist, caption="Label Shortlist — متغيّرات تصنيفية مناسبة للاعتماد")
+
+```
+
+
+
+
+```{r}
+plot_one_cat <- function(nm){
+  v <- clinical[[nm]]
+  df <- data.frame(val=v)
+  ggplot(df, aes(x = factor(val))) + geom_bar() +
+    labs(title = nm, x=NULL, y="Count") +
+    theme(axis.text.x = element_text(angle=30, hjust=1))
+}
+top_cats <- head(shortlist$name, 6)
+if(length(top_cats)){
+  for(nm in top_cats) print(plot_one_cat(nm))
+} else {
+  message("لا يوجد متغيّرات تصنيفية مطابقة للشروط — جرّب تخفيف الشروط أو راجع الأعمدة.")
+}
+
+```
+
+
+
+
+```{r}
+num_dict <- subset(dict, type=="numeric")
+# استبعد الأعمدة اللي شكلها ID/Batch
+num_dict <- subset(num_dict, !is_batch_like(name) & !is_id_like(name))
+# حد مفقود منطقي
+num_dict <- subset(num_dict, missing_rate <= 0.2)
+kable(head(num_dict[order(num_dict$missing_rate, -num_dict$unique_non_na), ], 20),
+      caption="Numeric covariates (مرشّحة)")
+
+```
+
+
+
+
+```{r}
+# meta خفيفة: (sample_id + shortlist columns + batch/type لو موجودين)
+keep_cols <- unique(c("sample_id","type","batch", shortlist$name))
+meta <- clinical[, intersect(keep_cols, names(clinical)), drop=FALSE]
+saveRDS(meta, file.path(proc_dir, "clinical", "meta_shortlist.rds"))
+if(!dir.exists(file.path(proc_dir,"clinical"))) dir.create(file.path(proc_dir,"clinical"), recursive = TRUE)
+arrow::write_parquet(as.data.frame(meta), file.path(proc_dir, "clinical", "meta_shortlist.parquet"))
+
+# كمان نحفظ الدكشنري
+arrow::write_parquet(as.data.frame(dict), file.path(proc_dir, "clinical", "clinical_dictionary.parquet"))
+saveRDS(dict, file.path(proc_dir, "clinical", "clinical_dictionary.rds"))
+
+# عرض سطر تأكيد
+nrow(meta); names(meta)
+
+```
+
+
+
+
+```{r}
+# --- 0) تحضير ---
+library(data.table); library(janitor); library(ggplot2); library(knitr)
+
+source("R/workflow_utils.R")
+cfg <- load_moda_paths()
+base_dir <- cfg$external_project_dir
+raw_dir  <- cfg$external_raw_dir
+proc_dir <- cfg$external_processed_dir
+if(!dir.exists(file.path(proc_dir,"clinical"))) dir.create(file.path(proc_dir,"clinical"), recursive = TRUE)
+
+std_ids <- function(x){ x <- toupper(gsub("\\s+","", as.character(x))); gsub("[^A-Z0-9_-]","", x) }
+common_samples <- readRDS(file.path(proc_dir, "common_samples.rds"))
+
+clin_path <- list.files(raw_dir, pattern="(?i)^Clinical.*\\.txt$|\\.tsi\\.txt$", full.names=TRUE)[1]
+clinical <- fread(clin_path, data.table=FALSE, na.strings=c("","NA","NaN"))
+names(clinical) <- make_clean_names(names(clinical))
+
+# التعرّف على عمود العينة
+cands <- c("sample_id","sample","aliquot","aliquot_id","experimental_sample_id",
+           "case_id","subject_id","tumor_sample_barcode","biospecimen_id","sample_name")
+present <- intersect(cands, names(clinical))
+scores  <- sapply(present, function(col) sum(std_ids(clinical[[col]]) %in% std_ids(common_samples)))
+best_col <- present[which.max(scores)]
+clinical$sample_id <- std_ids(clinical[[best_col]])
+
+clinical <- clinical[clinical$sample_id %in% std_ids(common_samples), , drop=FALSE]
+
+# --- 1) إعادة الترميز الأساسية ---
+# type
+if("tissue_type_0nat_1tumor" %in% names(clinical)){
+  clinical$type <- ifelse(clinical$tissue_type_0nat_1tumor %in% c(0,"0"), "NAT","Tumor")
+} else if(!"type" %in% names(clinical)){
+  stop("لم أجد عمود type/التصنيف النسيجي.")
+}
+
+# cohort كـ batch واقعي
+if("luad_cohort" %in% names(clinical)) {
+  clinical$cohort <- as.character(clinical$luad_cohort)
+} else clinical$cohort <- NA_character_
+
+# sex
+if("gender_0female_1male" %in% names(clinical)){
+  clinical$sex <- ifelse(clinical$gender_0female_1male %in% c(1,"1"), "Male", "Female")
+}
+
+# race collapsed
+if("race" %in% names(clinical)){
+  rc <- tolower(as.character(clinical$race))
+  rc[!rc %in% c("asian","white","black")] <- "other"
+  clinical$race_collapsed <- ifelse(rc %in% c("asian","white","black"), toupper(substr(rc,1,1)) %+% substr(rc,2,999), "Other")
+}
+
+# region (حافظ عليها كما هي)
+if("region" %in% names(clinical)) clinical$region <- as.character(clinical$region)
+
+# stage_full → stage_bin (Early vs Late)
+if("stage_full" %in% names(clinical)){
+  s <- toupper(gsub("\\s","", as.character(clinical$stage_full)))
+  early <- c("1A","1B","2A","2B","I","II","STAGE1","STAGE2")
+  late  <- c("3A","3B","3C","4","III","IV","STAGE3","STAGE4")
+  stage_bin <- ifelse(s %in% early, "Early",
+                 ifelse(s %in% late,  "Late", NA))
+  clinical$stage_bin <- stage_bin
+}
+
+# EGFR: classic vs باقي
+if("egfr_mutation_info" %in% names(clinical)){
+  eg <- gsub("\\s+","", as.character(clinical$egfr_mutation_info))
+  classic <- eg %in% c("Exon21.Leu858Arg","Exon19.Deletion")
+  clinical$egfr_classic_vs_other <- ifelse(classic, "Classic", 
+                                    ifelse(eg %in% c("No.Mutation","Other"), "NonClassic", NA))
+  # خيار بديل: EGFR_any (أي طفرة) vs WT
+  clinical$egfr_any_vs_wt <- ifelse(eg == "No.Mutation", "WT",
+                             ifelse(!is.na(eg), "Mut", NA))
+}
+
+# N-stage: Npos vs N0
+if("staging_pn" %in% names(clinical)){
+  pn <- toupper(as.character(clinical$staging_pn))
+  clinical$npos_vs_n0 <- ifelse(pn == "PN0", "N0",
+                          ifelse(pn %in% c("PN1","PN2","PN3"), "Npos", NA))
+}
+
+# numeric covariates
+clinical$age        <- suppressWarnings(as.numeric(clinical$age))
+clinical$tumor_size <- suppressWarnings(as.numeric(clinical$tumor_size))
+clinical$tmb        <- suppressWarnings(as.numeric(clinical$tmb))
+
+# TMB tertiles (لتجنّب cutoff ادعائي)
+if(!all(is.na(clinical$tmb))){
+  qs <- quantile(clinical$tmb, probs=c(1/3, 2/3), na.rm=TRUE)
+  clinical$tmb_tertile <- cut(clinical$tmb, breaks=c(-Inf, qs[1], qs[2], Inf),
+                              labels=c("Low","Mid","High"))
+}
+
+# --- 2) meta النهائي: احتفظ بما نحتاجه فقط ---
+keep <- c("sample_id","type","cohort","sex","age","race_collapsed","region",
+          "stage_bin","egfr_classic_vs_other","egfr_any_vs_wt","npos_vs_n0",
+          "tumor_size","tmb","tmb_tertile")
+meta <- clinical[, intersect(keep, names(clinical)), drop=FALSE]
+
+# --- 3) ملخصات سريعة للعرض ---
+count_tbl <- function(v) sort(table(v), decreasing=TRUE)
+kable(as.data.frame(count_tbl(meta$type)),  caption="type counts")
+if("stage_bin" %in% names(meta)) kable(as.data.frame(count_tbl(meta$stage_bin)), caption="stage_bin counts")
+if("egfr_classic_vs_other" %in% names(meta)) kable(as.data.frame(count_tbl(meta$egfr_classic_vs_other)), caption="EGFR (Classic vs NonClassic)")
+if("egfr_any_vs_wt" %in% names(meta)) kable(as.data.frame(count_tbl(meta$egfr_any_vs_wt)), caption="EGFR (Any vs WT)")
+if("npos_vs_n0" %in% names(meta)) kable(as.data.frame(count_tbl(meta$npos_vs_n0)), caption="Npos vs N0")
+kable(summary(meta$age), caption="Age summary")
+
+plot_bar <- function(nm){
+  if(!nm %in% names(meta)) return(invisible(NULL))
+  df <- data.frame(val = meta[[nm]])
+  ggplot(df, aes(x=factor(val))) + geom_bar() + labs(title=nm, x=NULL, y="Count") +
+    theme(axis.text.x = element_text(angle=30, hjust=1))
+}
+print(plot_bar("stage_bin")); print(plot_bar("egfr_classic_vs_other")); print(plot_bar("npos_vs_n0"))
+
+# --- 4) حفظ ---
+saveRDS(meta, file.path(proc_dir, "clinical", "meta_labels.rds"))
+arrow::write_parquet(as.data.frame(meta), file.path(proc_dir, "clinical", "meta_labels.parquet"))
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+
+```
+
+
+

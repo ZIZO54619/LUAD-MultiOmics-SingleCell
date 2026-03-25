@@ -1,0 +1,479 @@
+---
+title: "MODA • Step 02 — QC & Normalization"
+author: "Abdulaziz"
+date: "2025-09-14"
+output: html_document
+---
+
+# This R Markdown file performs systematic quality control (QC) and normalization
+
+# across all omics layers processed in Step 01. It ensures clean, comparable,
+
+# and batch-corrected datasets for downstream analyses.
+
+# 
+
+# Key Objectives:
+
+## 1) Load processed omics matrices and clinical metadata.
+
+## 2) Perform feature-level QC: remove excessive missingness, filter low variance.
+
+## 3) Apply imputation (MinProb) and batch correction (ComBat) where appropriate.
+
+## 4) Normalize data using Z-score scaling per feature.
+
+## 5) Visualize QC through PCA plots before/after normalization.
+
+## 6) Export cleaned and scaled datasets (RDS + Parquet) for reproducibility.
+
+## 7) Summarize QC metrics: missingness, feature counts, and PCA separation (R²).
+
+# 
+
+# Outputs include:
+
+## - PCA diagnostics for each omics layer.
+
+## - Summary QC tables and feature statistics.
+
+## - Harmonized, normalized omics datasets ready for integration.
+
+# 
+
+# This step establishes a unified foundation for robust multi-omics integration and modeling.
+
+```{r}
+# ===== 0) Lightweight package setup =====
+need <- c("ggplot2", "data.table", "janitor", "Matrix", "matrixStats", "arrow", "sva")
+inst <- need[!need %in% installed.packages()[, 1]]
+if (length(inst)) install.packages(inst, repos = "https://cloud.r-project.org")
+
+
+library(ggplot2)
+library(data.table)
+library(janitor)
+library(Matrix)
+library(matrixStats)
+library(arrow)
+library(sva)
+
+
+# ===== 1) Define project paths =====
+source("R/workflow_utils.R")
+cfg <- load_moda_paths()
+base_dir <- cfg$external_project_dir
+proc_dir <- cfg$external_processed_dir
+if (!nzchar(proc_dir) || !dir.exists(proc_dir)) {
+  stop("Processed data directory not found. Update config/paths.yml.")
+}
+
+
+```
+
+```{r}
+
+# ===== 2) Utility Functions =====
+
+# Z-score scaling (row-wise normalization)
+zscale <- function(m) {
+  m <- t(scale(t(as.matrix(m))))
+  m[is.na(m)] <- 0
+  m
+}
+
+# Calculate row-wise missingness ratio
+row_miss <- function(m) rowMeans(is.na(m) | is.infinite(m))
+
+# Filter features based on missingness threshold
+keep_miss <- function(m, thr = 0.2) m[row_miss(m) <= thr, , drop = FALSE]
+
+# PCA plotting function with optional metadata coloring
+pca_plot <- function(m, meta = NULL, color_by = NULL, title = "PCA") {
+  stopifnot(ncol(m) > 2)
+  pc <- prcomp(t(m), center = TRUE, scale. = TRUE)
+  df <- data.frame(sample_id = colnames(m), PC1 = pc$x[, 1], PC2 = pc$x[, 2])
+  
+  if (!is.null(meta) && !is.null(color_by) && color_by %in% names(meta)) {
+    idx <- match(df$sample_id, meta$sample_id)
+    df$col <- meta[[color_by]][idx]
+    ggplot(df, aes(PC1, PC2, color = col)) +
+      geom_point(size = 2) +
+      labs(title = title, subtitle = paste("Color by:", color_by))
+  } else {
+    ggplot(df, aes(PC1, PC2)) +
+      geom_point(size = 2) +
+      labs(title = title)
+  }
+}
+
+# Save processed and scaled versions of each omics layer
+save_layer <- function(clean, scaled, layer) {
+  out_dir <- file.path(proc_dir, layer)
+  if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+  saveRDS(clean,  file.path(out_dir, "clean.rds"))
+  saveRDS(scaled, file.path(out_dir, "scaled.rds"))
+  arrow::write_parquet(as.data.frame(clean) |> tibble::rownames_to_column("feature_id"),
+                       file.path(out_dir, "clean.parquet"))
+  arrow::write_parquet(as.data.frame(scaled) |> tibble::rownames_to_column("feature_id"),
+                       file.path(out_dir, "scaled.parquet"))
+}
+
+# Standardize IDs: uppercase, remove spaces and non-alphanumeric characters
+std_ids <- function(x) {
+  x <- toupper(gsub("\\s+", "", as.character(x)))
+  gsub("[^A-Z0-9_-]", "", x)
+}
+
+# Prepare data for PCA before normalization (filtering + median imputation)
+prep_for_pca_before <- function(m, min_non_na_frac = 0.5) {
+  m <- as.matrix(m)
+  m[!is.finite(m)] <- NA
+  
+  # Require at least half the samples per feature (conservative threshold)
+  min_ok <- pmax(3, ceiling(min_non_na_frac * ncol(m)))
+  keep1 <- rowSums(!is.na(m)) >= min_ok
+  m <- m[keep1, , drop = FALSE]
+  
+  # Impute missing values using median per feature
+  if (anyNA(m)) {
+    m <- t(apply(m, 1, function(x) { x[is.na(x)] <- median(x, na.rm = TRUE); x }))
+  }
+  
+  # Remove features with zero variance
+  keep2 <- matrixStats::rowSds(m) > 0
+  m <- m[keep2, , drop = FALSE]
+  m
+}
+
+
+```
+
+```{r}
+# ===== 3) Load Step 01 Matrices (directly from RDS) =====
+layers <- c("rna", "proteome", "phospho", "methyl", "mirna", "acetyl")
+mats <- setNames(lapply(layers, function(L) readRDS(file.path(proc_dir, L, paste0(L, ".rds")))), layers)
+common_samples <- readRDS(file.path(proc_dir, "common_samples.rds"))
+cs <- std_ids(common_samples)
+
+# ===== 4) Load Clinical Metadata =====
+clin_path <- list.files(file.path(base_dir, "data", "raw"),
+                        pattern = "(?i)^Clinical.*\\.txt$|\\.tsi\\.txt$", full.names = TRUE)[1]
+
+clinical <- data.table::fread(clin_path, data.table = FALSE)
+names(clinical) <- janitor::make_clean_names(names(clinical))
+
+# Select best column matching sample IDs
+cands <- c("sample_id", "sample", "aliquot", "aliquot_id", "experimental_sample_id",
+           "case_id", "subject_id", "tumor_sample_barcode")
+present <- intersect(cands, names(clinical))
+scores <- sapply(present, function(col) sum(std_ids(clinical[[col]]) %in% cs))
+best_col <- present[which.max(scores)]
+clinical$sample_id <- std_ids(clinical[[best_col]])
+
+# Identify batch/type columns (manually defined)
+batch_col <- if ("study_organization_0cptac_1icpc" %in% names(clinical)) "study_organization_0cptac_1icpc" else NA
+type_col  <- if ("tissue_type_0nat_1tumor" %in% names(clinical))          "tissue_type_0nat_1tumor"          else NA
+
+meta <- data.frame(
+  sample_id = clinical$sample_id,
+  batch = if (!is.na(batch_col)) clinical[[batch_col]] else NA,
+  type  = if (!is.na(type_col))  clinical[[type_col]]  else NA,
+  stringsAsFactors = FALSE
+)
+
+meta <- unique(meta[meta$sample_id %in% cs, , drop = FALSE])
+meta$batch <- ifelse(meta$batch %in% c(0, "0"), "CPTAC",
+               ifelse(meta$batch %in% c(1, "1"), "ICPC", as.character(meta$batch)))
+meta$type  <- ifelse(meta$type  %in% c(0, "0"), "NAT",
+               ifelse(meta$type  %in% c(1, "1"), "Tumor", as.character(meta$type)))
+
+# ===== 5) Determine PCA color variable =====
+color_var <- NULL
+if ("type" %in% names(meta) && length(unique(na.omit(meta$type))) > 1) {
+  color_var <- "type"
+} else if ("batch" %in% names(meta) && length(unique(na.omit(meta$batch))) > 1) {
+  color_var <- "batch"
+}
+
+# Display small metadata preview
+head(meta, 10)
+
+
+```
+
+```{r}
+# ===== 6) RNA Layer — QC, Filtering, and Batch Correction =====
+
+rna <- mats$rna[, cs, drop = FALSE]
+rna_before <- rna
+
+# Filter out bottom 10% of features by variance
+rv <- matrixStats::rowVars(rna, na.rm = TRUE)
+cut <- as.numeric(quantile(rv, 0.10, na.rm = TRUE))
+rna <- rna[rv > cut, , drop = FALSE]
+
+# Apply ComBat batch correction if applicable
+rna_clean <- rna
+if (!is.null(color_var) && "batch" %in% names(meta) && length(unique(na.omit(meta$batch))) > 1) {
+  b <- factor(meta$batch[match(colnames(rna), meta$sample_id)])
+  mod <- model.matrix(~1, data = data.frame(b))
+  rna_clean <- ComBat(as.matrix(rna), batch = b, mod = mod, par.prior = TRUE, prior.plots = FALSE)
+}
+
+# Z-score scaling
+rna_scaled <- zscale(rna_clean)
+
+# PCA plots before and after batch correction
+rna_before_for_pca <- prep_for_pca_before(rna_before)
+p1 <- pca_plot(rna_before_for_pca, meta, color_by = color_var, title = "RNA • PCA (Before)")
+p2 <- pca_plot(rna_scaled, meta, color_by = color_var, title = "RNA • PCA (After)")
+
+p1; p2
+
+# Save processed and scaled data + summary table
+save_layer(rna_clean, rna_scaled, "rna")
+data.frame(
+  layer = "RNA",
+  features_before = nrow(rna_before),
+  features_after  = nrow(rna_scaled),
+  samples         = ncol(rna_scaled)
+)
+
+```
+
+```{r}
+# ===== 7) Proteome Layer — QC, Imputation, and Batch Correction =====
+
+prot <- mats$proteome[, cs, drop = FALSE]
+prot_before <- prot
+
+# Remove features with >20% missingness
+prot <- keep_miss(prot, 0.2)
+
+# Impute missing values using MinProb (if applicable)
+prot_imp <- if (any(is.na(prot))) imputeLCMD::impute.MinProb(as.matrix(prot), q = 0.01) else prot
+
+# Apply ComBat batch correction if batch information is available
+prot_clean <- prot_imp
+if (!is.null(color_var) && "batch" %in% names(meta) && length(unique(na.omit(meta$batch))) > 1) {
+  b <- factor(meta$batch[match(colnames(prot_imp), meta$sample_id)])
+  mod <- model.matrix(~1, data = data.frame(b))
+  prot_clean <- ComBat(as.matrix(prot_imp), batch = b, mod = mod, par.prior = TRUE, prior.plots = FALSE)
+}
+
+# Z-score scaling
+prot_scaled <- zscale(prot_clean)
+
+# PCA plots before and after normalization
+prot_before_for_pca <- prep_for_pca_before(prot_before)
+p1 <- pca_plot(prot_before_for_pca, meta, color_by = color_var, title = "Proteome • PCA (Before)")
+p2 <- pca_plot(prot_scaled, meta, color_by = color_var, title = "Proteome • PCA (After)")
+p1; p2
+
+# Save processed and scaled data + summary table
+save_layer(prot_clean, prot_scaled, "proteome")
+
+data.frame(
+  layer = "Proteome",
+  features_before = nrow(prot_before),
+  features_after  = nrow(prot_scaled),
+  samples         = ncol(prot_scaled),
+  mean_missing_after = mean(is.na(prot_imp))
+)
+
+
+```
+
+```{r}
+# ===== 8) Phospho Layer — QC, Imputation, and Batch Correction =====
+
+library(imputeLCMD)
+
+ph <- mats$phospho[, cs, drop = FALSE]
+ph_before <- ph
+
+# Remove features with >50% missingness
+ph <- keep_miss(ph, 0.5)
+
+# Impute missing values using MinProb (if applicable)
+ph_imp <- if (any(is.na(ph))) imputeLCMD::impute.MinProb(as.matrix(ph), q = 0.01) else ph
+
+# Apply ComBat batch correction if batch information is available
+ph_clean <- ph_imp
+if (!is.null(color_var) && "batch" %in% names(meta) && length(unique(na.omit(meta$batch))) > 1) {
+  b <- factor(meta$batch[match(colnames(ph_imp), meta$sample_id)])
+  mod <- model.matrix(~1, data = data.frame(b))
+  ph_clean <- ComBat(as.matrix(ph_imp), batch = b, mod = mod, par.prior = TRUE, prior.plots = FALSE)
+}
+
+# Z-score scaling
+ph_scaled <- zscale(ph_clean)
+
+# PCA plot after normalization
+pca_plot(ph_scaled, meta, color_by = color_var, title = "Phospho • PCA (After)")
+
+# Save processed and scaled data + summary table
+save_layer(ph_clean, ph_scaled, "phospho")
+
+data.frame(
+  layer = "Phospho",
+  features_before = nrow(ph_before),
+  features_after  = nrow(ph_scaled),
+  samples         = ncol(ph_scaled),
+  mean_missing_after = mean(is.na(ph_imp))
+)
+
+```
+
+```{r}
+# ===== 9) Methylation Layer — Logit Transform and Scaling =====
+
+met <- mats$methyl[, cs, drop = FALSE]
+met_before <- met
+
+# Apply logit transform if data is within [0,1]
+rng <- range(met, na.rm = TRUE)
+met_m <- if (rng[1] >= 0 && rng[2] <= 1) log2((met + 1e-6) / (1 - met + 1e-6)) else met
+
+# Z-score scaling
+met_scaled <- zscale(met_m)
+
+# PCA plot after normalization
+pca_plot(met_scaled, meta, color_by = color_var, title = "Methylation • PCA (After)")
+
+# Save processed and scaled data + summary table
+save_layer(met_m, met_scaled, "methyl")
+
+data.frame(
+  layer = "Methylation",
+  value_range_before = paste(round(rng, 3), collapse = " to "),
+  features_after = nrow(met_scaled),
+  samples = ncol(met_scaled)
+)
+```
+
+# 6) miRNA — فلترة قليل التباين + Scaling
+
+```{r}
+# ===== 10) miRNA Layer — Variance Filtering and Scaling =====
+
+mi <- mats$mirna[, cs, drop = FALSE]
+mi_before <- mi
+
+# Filter out bottom 10% of features by variance
+rv <- matrixStats::rowVars(mi, na.rm = TRUE)
+cut <- as.numeric(quantile(rv, 0.10, na.rm = TRUE))
+mi_filt <- mi[rv > cut, , drop = FALSE]
+
+# Z-score scaling
+mi_scaled <- zscale(mi_filt)
+
+# PCA plot after normalization
+pca_plot(mi_scaled, meta, color_by = color_var, title = "miRNA • PCA (After)")
+
+# Save processed and scaled data + summary table
+save_layer(mi_filt, mi_scaled, "mirna")
+
+data.frame(
+  layer = "miRNA",
+  features_before = nrow(mi_before),
+  features_after  = nrow(mi_scaled),
+  samples         = ncol(mi_scaled)
+)
+
+```
+
+```{r}
+# ===== 11) Acetyl Layer — QC, Imputation, and Batch Correction =====
+
+ac <- mats$acetyl[, cs, drop = FALSE]
+ac_before <- ac
+
+# Remove features with >50% missingness
+ac <- keep_miss(ac, 0.5)
+
+# Impute missing values using MinProb (if applicable)
+ac_imp <- if (any(is.na(ac))) imputeLCMD::impute.MinProb(as.matrix(ac), q = 0.01) else ac
+
+# Apply ComBat batch correction if batch information is available
+ac_clean <- ac_imp
+if (!is.null(color_var) && "batch" %in% names(meta) && length(unique(na.omit(meta$batch))) > 1) {
+  b <- factor(meta$batch[match(colnames(ac_imp), meta$sample_id)])
+  mod <- model.matrix(~1, data = data.frame(b))
+  ac_clean <- ComBat(as.matrix(ac_imp), batch = b, mod = mod, par.prior = TRUE, prior.plots = FALSE)
+}
+
+# Z-score scaling
+ac_scaled <- zscale(ac_clean)
+
+# PCA plot after normalization
+pca_plot(ac_scaled, meta, color_by = color_var, title = "Acetyl • PCA (After)")
+
+# Save processed and scaled data + summary table
+save_layer(ac_clean, ac_scaled, "acetyl")
+
+data.frame(
+  layer = "Acetyl",
+  features_before = nrow(ac_before),
+  features_after  = nrow(ac_scaled),
+  samples         = ncol(ac_scaled),
+  mean_missing_after = mean(is.na(ac_imp))
+)
+
+
+```
+
+# 8) Summary Panel (جاهز للعرض/الحفظ)
+
+```{r}
+# ===== 12) Summary of Features After QC and Normalization =====
+
+summ <- rbind(
+  data.frame(layer = "RNA",      features = nrow(readRDS(file.path(proc_dir, "rna", "clean.rds")))),
+  data.frame(layer = "Proteome", features = nrow(readRDS(file.path(proc_dir, "proteome", "clean.rds")))),
+  data.frame(layer = "Phospho",  features = nrow(readRDS(file.path(proc_dir, "phospho", "clean.rds")))),
+  data.frame(layer = "Methyl",   features = nrow(readRDS(file.path(proc_dir, "methyl", "clean.rds")))),
+  data.frame(layer = "miRNA",    features = nrow(readRDS(file.path(proc_dir, "mirna", "clean.rds")))),
+  data.frame(layer = "Acetyl",   features = nrow(readRDS(file.path(proc_dir, "acetyl", "clean.rds"))))
+)
+
+# Display summary table
+knitr::kable(summ, caption = "Number of features after cleaning for each layer")
+
+# Bar plot of cleaned feature counts
+ggplot(summ, aes(reorder(layer, features), features)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = NULL, y = "Features (clean)", title = "Features after QC/Normalization")
+```
+
+```{r}
+# ===== 13) Missingness Summary Before Cleaning =====
+
+# Combine raw matrices before filtering/imputation
+mats_before <- list(
+  RNA         = rna_before,
+  Proteome    = prot_before,
+  Phospho     = ph_before,
+  Methylation = met_before,
+  miRNA       = mi_before,
+  Acetyl      = ac_before
+)
+
+# Compute missing proportion for each layer
+miss_layer <- do.call(rbind, lapply(names(mats_before), function(nm) {
+  m <- mats_before[[nm]]
+  data.frame(layer = nm, missing_prop = mean(is.na(m) | !is.finite(m)))
+}))
+
+# Display summary table
+knitr::kable(miss_layer, caption = "Overall missing value proportion per omics layer (before cleaning)")
+
+# Visualize missingness
+ggplot2::ggplot(miss_layer, ggplot2::aes(x = reorder(layer, -missing_prop), y = missing_prop)) +
+  ggplot2::geom_col() +
+  ggplot2::ylim(0, 1) +
+  ggplot2::labs(x = NULL, y = "Missing proportion", title = "Overall Missingness per Omics (Before)")
+
+```

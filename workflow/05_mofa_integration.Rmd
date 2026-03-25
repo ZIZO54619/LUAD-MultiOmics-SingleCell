@@ -1,0 +1,1302 @@
+---
+title: "MODA - Step 05 - MOFA Integration"
+author: "Abdulaziz"
+date: "2025-09-24"
+output: html_document
+---
+
+```{r}
+# ==== 0) Load Required Packages ====
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager", repos = "https://cloud.r-project.org")
+}
+need <- c("MOFA2", "dplyr", "ggplot2", "pheatmap", "matrixStats", "readr", "tibble")
+inst <- need[!need %in% installed.packages()[,1]]
+if (length(inst)) BiocManager::install(inst, ask = FALSE, update = FALSE)
+
+# Load libraries without startup messages
+suppressPackageStartupMessages({
+  library(MOFA2)
+  library(dplyr)
+  library(ggplot2)
+  library(pheatmap)
+  library(matrixStats)
+  library(readr)
+  library(tibble)
+})
+
+
+```
+
+
+
+```{r}
+# ==== 1) Define Directory Paths ====
+source("R/workflow_utils.R")
+cfg <- load_moda_paths()
+base_dir <- cfg$external_project_dir
+
+# Define subdirectories
+proc_dir <- cfg$external_processed_dir
+results_root <- if (nzchar(cfg$external_results_dir)) cfg$external_results_dir else file.path(base_dir, "results")
+
+# Create results directories if not already existing
+res_fig <- file.path(results_root, "figures");     dir.create(res_fig,  recursive = TRUE, showWarnings = FALSE)
+res_tab <- file.path(results_root, "tables");      dir.create(res_tab,  recursive = TRUE, showWarnings = FALSE)
+res_sig <- file.path(results_root, "signatures");  dir.create(res_sig, recursive = TRUE, showWarnings = FALSE)
+
+
+```
+
+
+
+```{r}
+# ==== 2) Load Scaled Matrices and Metadata ====
+rna  <- readRDS(file.path(proc_dir, "rna", "scaled.rds"))
+prot <- readRDS(file.path(proc_dir, "proteome", "scaled.rds"))
+ph   <- readRDS(file.path(proc_dir, "phospho", "scaled.rds"))
+meth <- readRDS(file.path(proc_dir, "methyl", "scaled.rds"))
+mir  <- readRDS(file.path(proc_dir, "mirna", "scaled.rds"))
+ac   <- readRDS(file.path(proc_dir, "acetyl", "scaled.rds"))
+
+meta <- readRDS(file.path(proc_dir, "clinical", "meta_labels.rds"))
+
+# Ensure the same sample order across all datasets
+all_cols <- list(
+  colnames(rna),
+  colnames(prot),
+  colnames(ph),
+  colnames(meth),
+  colnames(mir),
+  colnames(ac)
+)
+
+common <- Reduce(intersect, all_cols)
+stopifnot(length(common) >= 250)
+
+# Reorder columns to match the common set
+reorder <- function(m) m[, common, drop = FALSE]
+rna <- reorder(rna)
+prot <- reorder(prot)
+ph <- reorder(ph)
+meth <- reorder(meth)
+mir <- reorder(mir)
+ac <- reorder(ac)
+```
+
+
+
+# ==== 4) Build MOFA object ====
+
+
+```{r}
+# ==== 3) Configure Python Environment for MOFA+ ====
+library(MOFA2)
+library(reticulate)
+
+# Display current Python configuration
+py_config()
+
+# Specify Python path for reticulate
+use_python("C:/Users/Abdulaziz/AppData/Local/R/cache/R/reticulate/uv/cache/archive-v0/rgscnchdk2HTReaGVTqRn/Scripts/python.exe", required = TRUE)
+
+# Verify that the 'mofapy2' Python module is available
+stopifnot(py_module_available("mofapy2"))
+
+```
+
+
+```{r}
+# ==== 4) Create and Configure MOFA+ Object ====
+
+# Create the MOFA object from input views
+MOFAobject <- create_mofa(views)
+MOFAobject
+```
+
+
+
+
+```{r}
+# Visualize data overview
+plot_data_overview(MOFAobject)
+```
+
+
+
+```{r}
+# ---- Data Options ----
+data_opts <- get_default_data_options(MOFAobject)
+data_opts
+
+# ---- Model Options ----
+model_opts <- get_default_model_options(MOFAobject)
+model_opts$num_factors <- 15  # Set the number of latent factors
+model_opts
+
+# ---- Training Options ----
+train_opts <- get_default_training_options(MOFAobject)
+train_opts$convergence_mode <- "slow"  # Use slow convergence mode for better accuracy
+train_opts$seed <- 42                  # Set seed for reproducibility
+train_opts
+
+# ---- Prepare MOFA Object for Training ----
+MOFAobject <- prepare_mofa(
+  MOFAobject,
+  data_options = data_opts,
+  model_options = model_opts,
+  training_options = train_opts
+)
+
+```
+
+
+
+
+```{r}
+# ==== 5) Set Python Environment and Run MOFA+ ====
+
+# Set the Python environment to the specified virtual environment
+Sys.setenv(RETICULATE_PYTHON = "C:/Users/Abdulaziz/venvs/mofa/Scripts/python.exe")
+
+library(reticulate)
+
+# Check that Python path and numpy version match expectations (should show venv path and numpy==1.26.4)
+py_config()
+
+# ---- Continue with MOFA+ ----
+library(MOFA2)
+
+# If MOFAobject is not available after restart, re-run the creation and preparation steps
+MOFAmodel <- run_mofa(MOFAobject)
+
+# Save the trained MOFA model
+saveRDS(MOFAmodel, file.path(res_sig, "MOFA_model.rds"))
+
+
+```
+
+
+
+```{r}
+# ==== 6) Load Trained MOFA+ Model ====
+
+library(MOFA2)
+
+# Load the trained MOFA model
+mofa <- readRDS(file.path(res_sig, "MOFA_model.rds"))
+
+# Verify that the model is loaded correctly
+mofa
+
+# Assign model to a shorter variable name for convenience
+model <- mofa
+
+
+```
+
+```{r}
+plot_factor_cor(model)
+
+```
+```{r}
+plot_variance_explained(model, max_r2=15)
+
+```
+
+
+```{r}
+# ==== 7) Load and Clean Clinical Metadata ====
+out_dir <- proc_dir
+
+# Load clinical metadata file
+clinical_imp <- read_tsv(file.path(out_dir, "clinical_clean.tsv"))
+
+# Copy data and rename the sample ID column
+meta_orig <- clinical_imp
+meta_orig <- meta_orig %>% rename(sample = sample_id)
+
+# Temporarily store the first column (for rownames assignment)
+rownames_tmp <- meta_orig[[1]]
+
+# Remove the first column if needed
+# meta_orig <- meta_orig[, -1, drop = FALSE]
+
+# Assign row names based on the first column
+rownames(meta_orig) <- rownames_tmp
+
+# Remove dots from row names
+rownames(meta_orig) <- gsub("\\.", "", rownames(meta_orig))  # Removes dots
+
+# Add sample column explicitly
+meta_orig$sample <- rownames(meta_orig)
+
+# Ensure row names match the sample column
+rownames(meta_orig) <- meta_orig[[1]]
+
+# Recode EGFR mutation information into grouped categories
+meta_orig$egfr_mutation_info <- ifelse(
+  meta_orig$egfr_mutation_info %in% c("Exon21.Leu858Arg", "Exon19.Deletion", "Other"),
+  "Mutation",
+  meta_orig$egfr_mutation_info
+)
+
+
+```
+
+
+
+
+```{r}
+colnames(meta_orig)
+```
+
+
+
+```{r}
+# ==== 8) Link Clinical Metadata to MOFA+ Model and Correlate Factors ====
+
+# Assume meta_reclean (or meta_orig) has been prepared and linked to the model
+samples_metadata(model) <- meta_orig  # Use this for MOFA+ (or samples_metadata(model) for older MOFA versions)
+
+# Define key clinical covariates for correlation analysis
+top_covs <- c(
+  "gender_0female_1male",
+  "luad_cohort", "race", "country", "region",
+  "staging_pt", "staging_pn", "stage_full", "egfr_mutation_info",
+  "stage", "age", "tumor_size", "tmb",
+  "smoking_score", "overall_survival_37", "overall_survival_38",
+  "recurrence_free_survival_39", "recurrence_free_survival_40"
+)
+
+# Correlate MOFA factors with selected clinical covariates (visualized as log p-values)
+correlate_factors_with_covariates(
+  model,
+  covariates = top_covs,
+  plot = "log_pval"
+)
+
+```
+
+
+
+
+```{r}
+correlate_factors_with_covariates(model, covariates = top_covs, return_data = TRUE)
+
+```
+
+```{r}
+# ==== 9) Extract Top Features per Factor from MOFA+ Model ====
+
+library(MOFA2)
+library(dplyr)
+
+# Select factors of interest (F1: Smoking/TMB, F3: EGFR/Overall Survival)
+sel_factors <- c(1, 3)
+
+# ---- RNA ----
+w_rna <- get_weights(model, views = "RNA", factors = sel_factors, as.data.frame = TRUE)
+top_rna <- w_rna %>%
+  group_by(factor) %>%
+  slice_max(order_by = abs(value), n = 200) %>%
+  pull(feature) %>%
+  unique()
+
+# ---- miRNA (if available) ----
+w_mir <- get_weights(model, views = "miRNA", factors = sel_factors, as.data.frame = TRUE)
+top_mir <- w_mir %>%
+  group_by(factor) %>%
+  slice_max(order_by = abs(value), n = 50) %>%
+  pull(feature) %>%
+  unique()
+
+# ---- Methylation (useful for EGFR/methylation-related analysis) ----
+w_meth <- get_weights(model, views = "Methyl", factors = c(2, 3), as.data.frame = TRUE)
+top_meth <- w_meth %>%
+  group_by(factor) %>%
+  slice_max(order_by = abs(value), n = 200) %>%
+  pull(feature) %>%
+  unique()
+
+```
+
+
+
+```{r}
+# ==== 10) Extract Top Features from Multiple Views (Robust Function) ====
+
+library(MOFA2)
+library(dplyr)
+
+# Get available view names (compatible with all MOFA2 versions)
+views_avail <- tryCatch(
+  views_names(model),
+  error = function(e) names(feature_names(model))
+)
+print(views_avail)
+# Expected output: "RNA" "Proteome" "Phospho" "Methyl" "miRNA" "Acetyl"
+
+# Define a robust function to extract top features from any view for selected factors
+get_top <- function(model, view, factors, n = 200) {
+  # Assume the view name is valid; if not, print a helpful message
+  W <- try(
+    get_weights(model, views = view, factors = factors, as.data.frame = TRUE),
+    silent = TRUE
+  )
+  
+  if (inherits(W, "try-error") || is.null(W) || nrow(W) == 0) {
+    message("Skipping view '", view, "' (not found or empty).")
+    return(character(0))
+  }
+  
+  W %>%
+    group_by(feature) %>%
+    summarise(score = sum(abs(value)), .groups = "drop") %>%
+    slice_max(order_by = score, n = n) %>%
+    pull(feature) %>%
+    unique()
+}
+
+# ---- Example Usage (Based on Analysis Plan) ----
+top_rna_F1   <- get_top(model, "RNA",    factors = 1,      n = 200)
+top_mir_F1   <- get_top(model, "miRNA",  factors = 1,      n = 50)
+top_rna_F3   <- get_top(model, "RNA",    factors = 3,      n = 200)
+top_meth_F23 <- get_top(model, "Methyl", factors = c(2, 3), n = 200)
+
+# Display the number of top features retrieved from each view
+length(top_rna_F1)
+length(top_mir_F1)
+length(top_rna_F3)
+length(top_meth_F23)
+
+
+
+```
+
+
+
+```{r}
+
+# ==== 11) Export Top Features to CSV Files ====
+
+# Export top RNA features for Factor 1
+write.csv(
+  data.frame(gene = top_rna_F1),
+  file.path(res_sig, "MOFA_F1_RNA_top.csv"),
+  row.names = FALSE
+)
+
+# Export top miRNA features for Factor 1
+write.csv(
+  data.frame(mir = top_mir_F1),
+  file.path(res_sig, "MOFA_F1_miRNA_top.csv"),
+  row.names = FALSE
+)
+
+# Export top RNA features for Factor 3
+write.csv(
+  data.frame(gene = top_rna_F3),
+  file.path(res_sig, "MOFA_F3_RNA_top.csv"),
+  row.names = FALSE
+)
+
+# Export top Methylation features for Factors 2 and 3
+write.csv(
+  data.frame(feat = top_meth_F23),
+  file.path(res_sig, "MOFA_F23_Methyl_top.csv"),
+  row.names = FALSE
+)
+
+
+```
+
+
+
+```{r}
+
+# لون Factor1 بالـsmoking وTMB
+plot_factor(model, factors=1, color_by="tissue_type_0nat_1tumor")
+plot_factor(model, factors=1, color_by="tmb")
+plot_factor(model, factors=1, color_by="smoking_score")
+plot_factor(model, factors=3, color_by="smoking_score")
+plot_factor(model, factors=3, color_by="tmb")
+
+# لون Factor3 بـ EGFR وبـ OS/RFS (لو مناسب)
+plot_factor(model, factors=3, color_by="egfr_mutation_info")
+plot_weights(model, factors=1, view="RNA",   nfeatures=30)
+plot_weights(model, factors=3, view="RNA",   nfeatures=30)
+plot_weights(model, factors=2, view="Methyl",nfeatures=30)
+
+```
+
+
+
+
+```{r}
+# ==== 13) Statistical Analysis and Visualization of Factors by EGFR Status ====
+
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+library(effectsize)  # For computing Cohen's d effect size
+
+# ---- Compute effect sizes and central tendency differences for each factor ----
+es_tab <- df_plot %>%
+  group_by(factor) %>%
+  summarise(
+    median_No = median(value[egfr_mutation_info == "No.Mutation"], na.rm = TRUE),
+    median_Mut = median(value[egfr_mutation_info == "Mutation"], na.rm = TRUE),
+    mean_No = mean(value[egfr_mutation_info == "No.Mutation"], na.rm = TRUE),
+    mean_Mut = mean(value[egfr_mutation_info == "Mutation"], na.rm = TRUE),
+    n_No = sum(egfr_mutation_info == "No.Mutation"),
+    n_Mut = sum(egfr_mutation_info == "Mutation"),
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(
+    median_diff = median_Mut - median_No,
+    mean_diff = mean_Mut - mean_No,
+    cohen_d = tryCatch(
+      cohens_d(value ~ egfr_mutation_info, data = df_plot %>% filter(factor == factor))$Cohens_d,
+      error = function(e) NA_real_
+    )
+  )
+
+# ---- Merge p-values with effect size table ----
+annot <- pv_tab %>% left_join(es_tab, by = "factor")
+
+# ---- Create violin and box plots for each factor ----
+p2 <- ggplot(df_plot, aes(x = egfr_mutation_info, y = value, fill = egfr_mutation_info)) +
+  geom_violin(trim = TRUE, width = 0.9, alpha = 0.7) +
+  geom_boxplot(width = 0.12, outlier.shape = NA, alpha = 0.9) +
+  geom_jitter(width = 0.15, size = 0.6, alpha = 0.6) +
+  facet_wrap(~ factor, scales = "fixed", ncol = 3) +
+  scale_fill_brewer(palette = "Set2") +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(face = "bold")
+  ) +
+  labs(
+    x = "EGFR mutation",
+    y = "Factor value",
+    title = "Violin plots of significant Factors by EGFR status"
+  )
+
+# ---- Add statistical annotations (p, FDR, median difference, Cohen's d) ----
+pos <- df_plot %>%
+  group_by(factor) %>%
+  summarise(ymax = max(value, na.rm = TRUE)) %>%
+  left_join(annot, by = "factor") %>%
+  mutate(
+    label = paste0(
+      "p=", ifelse(p_wilcox < 1e-4, "<1e-4", signif(p_wilcox, 3)),
+      "\nFDR=", signif(FDR_wilcox, 3),
+      "\ndMedian=", round(median_diff, 3),
+      "\nCohenD=", round(cohen_d, 2)
+    ),
+    y = ymax + 0.12 * (abs(ymax) + 1)
+  )
+
+p2 + geom_text(data = pos, aes(x = 1.5, y = y, label = label), inherit.aes = FALSE, size = 3)
+
+
+```
+
+
+
+
+
+
+```{r}
+# ==== 14) Extract Factors from MOFA+ Model and Perform Statistical Tests ====
+
+# Extract all factors from the trained model
+factors_all <- get_factors(model, as.data.frame = TRUE)
+
+# Preview the factor table (expected columns: sample, factor, value, group)
+head(factors_all)
+
+library(tidyr)
+
+# ---- Reshape factors into a wide format (one column per factor) ----
+df_factors <- factors_all %>%
+  tidyr::pivot_wider(names_from = factor, values_from = value)
+
+df <- df_factors
+
+# ---- Add clinical variables (EGFR status, TMB, smoking score) ----
+df$EGFR_simple <- ifelse(
+  meta_orig[df$sample, "egfr_mutation_info"] == "No.Mutation",
+  "No.Mutation",
+  "Mutation"
+)
+
+df$tmb <- as.numeric(meta_orig[df$sample, "tmb"])
+df$smoking <- as.numeric(meta_orig[df$sample, "smoking_score"])
+
+# ---- Statistical Tests ----
+
+# Compare Factor 1 and Factor 3 values between EGFR mutation groups
+wilcox.test(df$Factor1 ~ df$EGFR_simple)
+wilcox.test(df$Factor3 ~ df$EGFR_simple)
+
+# Correlation between factors and TMB
+cor.test(df$Factor1, df$tmb, method = "spearman")
+cor.test(df$Factor3, df$tmb, method = "spearman")
+
+# Correlation between factors and smoking score
+cor.test(df$Factor1, df$smoking, method = "spearman")
+cor.test(df$Factor3, df$smoking, method = "spearman")
+
+
+```
+
+
+
+```{r}
+# ==== 15) Visualize Factor Associations and Compute Effect Sizes ====
+
+# ---- Scatter plot: Factor 1 vs TMB, colored by EGFR mutation status ----
+ggscatter(df, x = "tmb", y = "Factor1", color = "EGFR_simple", palette = "jco", add = "reg.line") +
+  stat_cor(method = "spearman") +
+  scale_x_log10() +
+  labs(title = "Factor1 vs TMB")
+
+library(dplyr)
+library(effsize)
+
+```
+
+
+
+```{r}
+
+# ---- Summary statistics by EGFR mutation group ----
+df %>%
+  group_by(EGFR_simple) %>%
+  summarise(
+    n = n(),
+    F1_med = median(Factor1),
+    F3_med = median(Factor3),
+    TMB_med = median(tmb, na.rm = TRUE),
+    smoke_med = median(smoking, na.rm = TRUE)
+  )
+
+# ---- Compute effect sizes (Cliff’s Delta) for EGFR mutation separation ----
+cliff.delta(Factor1 ~ EGFR_simple, data = df)
+cliff.delta(Factor3 ~ EGFR_simple, data = df)
+
+```
+
+
+
+```{r}
+# ==== 16) Logistic Regression and Feature Weight Exploration ====
+
+# ---- Encode EGFR mutation as a binary variable ----
+df$EGFR_bin <- ifelse(df$EGFR_simple == "Mutation", 1, 0)
+
+# ---- Logistic regression: Predict EGFR mutation using Factor3, TMB, and smoking ----
+fit1 <- glm(EGFR_bin ~ Factor3 + log10(tmb + 1) + smoking, data = df, family = binomial)
+summary(fit1)
+
+# ---- Compute AUC for model performance ----
+library(pROC)
+auc1 <- roc(df$EGFR_bin, fitted(fit1))
+auc1$auc
+
+# ---- Correlation between Factor1 and TMB within EGFR subgroups ----
+by(
+  df, df$EGFR_simple,
+  function(d) cor.test(d$Factor1, d$tmb, method = "spearman", use = "complete.obs")
+)
+
+library(dplyr)
+
+# ---- Extract top weighted RNA features for Factor 1 ----
+w_F1_RNA <- get_weights(model, views = "RNA", factors = 1, as.data.frame = TRUE) %>%
+  arrange(desc(abs(value))) %>%
+  slice_head(n = 200)
+
+# ---- Extract top weighted miRNA features for Factor 1 ----
+w_F1_miR <- get_weights(model, views = "miRNA", factors = 1, as.data.frame = TRUE) %>%
+  arrange(desc(abs(value))) %>%
+  slice_head(n = 100)
+
+# (Repeat for Factor 3 and Methylation view if they show significant contribution)
+
+w_F1_RNA
+w_F1_miR
+
+
+```
+
+
+```{r}
+# ==== 17) Plot Factor 1 by Its Own Values ====
+MOFAobject = mofa
+plot_factor(MOFAobject,
+  factors = 1,
+  color_by = "Factor1"
+)
+```
+
+```{r}
+names(model@data)
+```
+
+
+```{r}
+# ==== Plot Feature Weights for Factor 3 Across All Views ====
+# "RNA"  "Proteome" "Phospho"  "Methyl" "miRNA"  "Acetyl" 
+plot_weights(MOFAobject,
+ view = "RNA",
+ factor = 3,
+ nfeatures = 10,     # Top number of features to highlight
+ scale = T           # Scale weights from -1 to 1
+)
+
+
+
+plot_weights(MOFAobject,
+ view = "Proteome",
+ factor = 3,
+ nfeatures = 10,     # Top number of features to highlight
+ scale = T           # Scale weights from -1 to 1
+)
+
+
+
+plot_weights(MOFAobject,
+ view = "Methyl",
+ factor = 3,
+ nfeatures = 10,     # Top number of features to highlight
+ scale = T           # Scale weights from -1 to 1
+)
+
+
+
+plot_weights(MOFAobject,
+ view = "Phospho",
+ factor = 3,
+ nfeatures = 10,     # Top number of features to highlight
+ scale = T           # Scale weights from -1 to 1
+)
+
+
+
+plot_weights(MOFAobject,
+ view = "miRNA",
+ factor = 3,
+ nfeatures = 10,     # Top number of features to highlight
+ scale = T           # Scale weights from -1 to 1
+)
+
+
+
+plot_weights(MOFAobject,
+ view = "Acetyl",
+ factor = 3,
+ nfeatures = 10,     # Top number of features to highlight
+ scale = T           # Scale weights from -1 to 1
+)
+
+
+
+
+```
+
+
+
+```{r}
+# ==== Plot Top Feature Weights for Factor 3 Across All Views ====
+# "RNA"  "Proteome" "Phospho"  "Methyl" "miRNA"  "Acetyl" 
+plot_top_weights(MOFAobject,
+ view = "RNA",
+ factor = 3,
+ nfeatures = 10,     # Top number of features to highlight
+ scale = T           # Scale weights from -1 to 1
+)
+
+
+plot_top_weights(MOFAobject,
+ view = "Proteome",
+ factor = 3,
+ nfeatures = 10,     # Top number of features to highlight
+ scale = T           # Scale weights from -1 to 1
+)
+
+
+plot_top_weights(MOFAobject,
+ view = "Phospho",
+ factor = 3,
+ nfeatures = 10,     # Top number of features to highlight
+ scale = T           # Scale weights from -1 to 1
+)
+
+
+plot_top_weights(MOFAobject,
+ view = "Methyl",
+ factor = 3,
+ nfeatures = 10,     # Top number of features to highlight
+ scale = T           # Scale weights from -1 to 1
+)
+
+
+plot_top_weights(MOFAobject,
+ view = "miRNA",
+ factor = 3,
+ nfeatures = 10,     # Top number of features to highlight
+ scale = T           # Scale weights from -1 to 1
+)
+
+
+plot_top_weights(MOFAobject,
+ view = "Acetyl",
+ factor = 3,
+ nfeatures = 10,     # Top number of features to highlight
+ scale = T           # Scale weights from -1 to 1
+)
+
+
+# "RNA"         ==> Cav1_RNA  ,  ECSCR
+# "Proteome"    ==> MYO1C_Proteome   ,  EHD2_Proteome
+# "Phospho"     ==> SPTAN1_Phospho  ,  HSPA12B_Phospho
+# "Methyl"      ==> TENC1  ,  TSTD1_Methyl , - SCT 
+# "miRNA"       ==> hsa-mir-126  , hsa-mir-30a
+# "Acetyl"      ==> ADH1B_Acetyl   ,CANIN1_Acetyl
+
+
+```
+
+
+
+```{r}
+plot_factor(MOFAobject,
+  factors = 1,
+  color_by = "CAV1_RNA",
+  add_violin = TRUE,
+  dodge = TRUE
+)
+```
+
+
+```{r}
+#  "sample" "type"   "egfr"   "group" 
+plot_factor(MOFAobject,
+  factors = 1,
+  color_by = "type",
+  dodge = TRUE,
+  add_violin = TRUE
+)
+
+
+plot_factor(model,
+  factors = 3,
+  color_by = "egfr_mutation_info",
+  dodge = TRUE,
+  add_violin = TRUE
+)
+plot_factor(model,
+  factors = 10,
+  color_by = "egfr_mutation_info",
+  dodge = TRUE,
+  add_violin = TRUE
+)
+plot_factor(model,
+  factors = 11,
+  color_by = "egfr_mutation_info",
+  dodge = TRUE,
+  add_violin = TRUE
+)
+plot_factor(model,
+  factors = 1,
+  color_by = "egfr_mutation_info",
+  dodge = TRUE,
+  add_violin = TRUE
+)
+
+
+plot_factor(MOFAobject,
+  factors = 1,
+  color_by = "group",
+  dodge = TRUE,
+  add_violin = TRUE
+)
+```
+
+
+```{r}
+plot_data_scatter(MOFAobject,
+  view = "RNA",
+  factor = 1,
+  features = 4,
+  sign = "positive",
+  color_by = "CAV1_RNA"
+) + labs(y="RNA expression")
+```
+
+
+
+```{r}
+# "RNA"  "Proteome" "Phospho"  "Methyl" "miRNA"  "Acetyl" 
+plot_data_heatmap(MOFAobject,
+  view = "RNA",
+  factor = 3,
+  features = 25,
+  denoise = TRUE,
+  cluster_rows = FALSE, cluster_cols = FALSE,
+  show_rownames = TRUE, show_colnames = FALSE,
+  scale = "row"
+)
+
+
+plot_data_heatmap(MOFAobject,
+  view = "Proteome",
+  factor = 3,
+  features = 25,
+  denoise = TRUE,
+  cluster_rows = FALSE, cluster_cols = FALSE,
+  show_rownames = TRUE, show_colnames = FALSE,
+  scale = "row"
+)
+
+
+plot_data_heatmap(MOFAobject,
+  view = "Phospho",
+  factor = 3,
+  features = 25,
+  denoise = TRUE,
+  cluster_rows = FALSE, cluster_cols = FALSE,
+  show_rownames = TRUE, show_colnames = FALSE,
+  scale = "row"
+)
+
+
+plot_data_heatmap(MOFAobject,
+  view = "Methyl",
+  factor = 3,
+  features = 25,
+  denoise = TRUE,
+  cluster_rows = FALSE, cluster_cols = FALSE,
+  show_rownames = TRUE, show_colnames = FALSE,
+  scale = "row"
+)
+
+
+plot_data_heatmap(MOFAobject,
+  view = "miRNA",
+  factor = 3,
+  features = 25,
+  denoise = TRUE,
+  cluster_rows = FALSE, cluster_cols = FALSE,
+  show_rownames = TRUE, show_colnames = FALSE,
+  scale = "row"
+)
+
+
+plot_data_heatmap(MOFAobject,
+  view = "Acetyl",
+  factor = 3,
+  features = 25,
+  denoise = TRUE,
+  cluster_rows = FALSE, cluster_cols = FALSE,
+  show_rownames = TRUE, show_colnames = FALSE,
+  scale = "row"
+)
+
+```
+
+
+
+
+
+# "RNA"         ==> CAV1_RNA  ,  ECSCR
+# "Proteome"    ==> MYO1C_Proteome   ,  EHD2_Proteome
+# "Phospho"     ==> SPTAN1_Phospho  ,  HSPA12B_Phospho
+# "Methyl"      ==> TENC1  ,  TSTD1_Methyl
+# "miRNA"       ==> hsa-mir-126  , hsa-mir-30a
+# "Acetyl"      ==> ADH1B_Acetyl   ,CANIN1_Acetyl
+
+```{r}
+
+p <- plot_factors(
+  model,
+  factors   = c(1,2),      # بدّل الأرقام حسب رغبتك
+  color_by  = "type",
+  shape_by  = "egfr",
+  dot_size  = 2.5,
+  show_missing = TRUE
+)
+
+# 3) زوّد خطوط فاصلة (اختار الإحداثيات اللي تريحك)
+p <- p +
+  geom_hline(yintercept = -1, linetype = "dashed") +
+  geom_vline(xintercept = -0.5, linetype = "dashed") +
+  theme_bw(base_size = 12)
+
+print(p)
+
+
+```
+
+
+
+```{r}
+# ==== 19) Gene Set Enrichment Analysis (GSEA) Preparation ====
+
+library(MOFA2)
+# library(reactomeGS)
+library(data.table)
+library(ggplot2)
+library(tidyverse)
+library(msigdbr)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+```
+
+
+
+```{r}
+
+# ==== 26) GSEA Mapping and Gene Annotation ====
+
+library(MOFA2)
+library(dplyr)
+library(msigdbr)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+# ---- Extract RNA gene symbols from the MOFA object ----
+sym_raw <- features_names(MOFAobject)[["RNA"]]
+
+# Clean gene symbols (remove "_RNA" suffix and extra spaces)
+sym_clean <- sub("_RNA$", "", trimws(sym_raw))
+
+# ---- Map SYMBOL → ENSEMBL ----
+m1 <- AnnotationDbi::select(
+  org.Hs.eg.db,
+  keys = unique(sym_clean),
+  keytype = "SYMBOL",
+  columns = "ENSEMBL"
+)
+m1 <- m1[!is.na(m1$ENSEMBL), c("SYMBOL", "ENSEMBL")]
+m1 <- m1[!duplicated(m1$SYMBOL), ]
+
+# ---- Map unresolved genes via ALIAS ----
+missing <- setdiff(unique(sym_clean), m1$SYMBOL)
+m2 <- if (length(missing)) {
+  tmp <- AnnotationDbi::select(
+    org.Hs.eg.db,
+    keys = missing,
+    keytype = "ALIAS",
+    columns = c("SYMBOL", "ENSEMBL")
+  )
+  tmp <- tmp[!is.na(tmp$ENSEMBL) & !is.na(tmp$SYMBOL), ]
+  tmp <- tmp[!duplicated(tmp$ALIAS), c("SYMBOL", "ENSEMBL")]
+  tmp <- tmp[!tmp$SYMBOL %in% m1$SYMBOL, ]
+  tmp
+} else data.frame(SYMBOL = character(), ENSEMBL = character())
+
+map <- rbind(m1, m2)
+
+# ---- Build mapping vector ----
+sym2ens <- setNames(map$ENSEMBL, map$SYMBOL)
+ens_vec <- unname(sym2ens[sym_clean])
+
+# For unmapped genes, keep them as "SYMBOL:<GENE>" for clarity
+na_idx <- is.na(ens_vec)
+ens_vec[na_idx] <- paste0("SYMBOL:", sym_clean[na_idx])
+
+# Ensure unique names
+ens_vec <- make.unique(ens_vec)
+
+# Coverage report
+n_total <- length(sym_clean)
+n_map <- sum(!na_idx)
+cat("Mapped to Ensembl:", round(100 * n_map / n_total, 1), "%\n")
+# Example output: Mapped to Ensembl: 97.8 %
+
+```
+
+```{r}
+# ==== 20) Update MOFA Object with Ensembl Gene IDs ====
+
+# 0) Create a working copy of the MOFA object
+MOFA_ens <- mofa
+
+# 1) Retrieve current RNA feature names
+sym_now <- features_names(MOFA_ens)[["RNA"]]
+
+# 2) Clean and fix Ensembl vector
+ens_fix <- ens_vec
+bad <- is.na(ens_fix) | ens_fix == ""
+ens_fix[bad] <- paste0("UNK__", sym_now[bad])
+
+# Make all names unique in case of duplicates
+if (any(duplicated(ens_fix))) {
+  dups <- which(duplicated(ens_fix))
+  ens_fix[dups] <- paste0(ens_fix[dups], "_", ave(ens_fix[dups], ens_fix[dups], FUN = seq_along))
+}
+
+# 3) Apply the updated feature names to the MOFA object
+fn <- features_names(MOFA_ens)
+stopifnot(length(fn[["RNA"]]) == length(ens_fix))
+fn[["RNA"]] <- ens_fix
+features_names(MOFA_ens) <- fn
+
+# 4) Align row names of RNA weights with updated Ensembl IDs
+rownames(MOFA_ens@expectations$W$RNA) <- ens_fix
+
+# ---- Confirmation ----
+features_names(MOFA_ens)[["RNA"]][1:5]
+rownames(MOFA_ens@expectations$W$RNA)[1:5]
+
+# Example output:
+# features_names(MOFA_ens)[["RNA"]][1:5]
+# [1] "ENSG00000121410" "ENSG00000148584" "SYMBOL:A2BP1" "SYMBOL:A2LD1" "ENSG00000166535"
+# rownames(MOFA_ens@expectations$W$RNA)[1:5]
+# [1] "ENSG00000121410" "ENSG00000148584" "SYMBOL:A2BP1" "SYMBOL:A2LD1" "ENSG00000166535"
+
+```
+
+```{r}
+# ==== 21) Load and Inspect Reactome Gene Sets ====
+
+# Load the MOFAdata package and import Reactome gene sets
+library(MOFAdata)
+data("reactomeGS", package = "MOFAdata")
+
+# Quick inspection of the Reactome gene set matrix
+dim(reactomeGS)         # Dimensions: pathways × genes
+str(reactomeGS)
+rownames(reactomeGS)[1:10]
+colnames(reactomeGS)[1:10]
+
+```
+
+
+```{r}
+utils::data(reactomeGS)
+
+head(colnames(reactomeGS))
+```
+
+
+
+```{r}
+head(rownames(reactomeGS))
+
+```
+
+
+
+```{r}
+
+# GSEA on positive weights, with default options
+res.positive <- run_enrichment(MOFA_ens, 
+  feature.sets = reactomeGS, 
+  view = "RNA",
+  sign = "positive"
+)
+
+# GSEA on negative weights, with default options
+res.negative <- run_enrichment(MOFA_ens, 
+  feature.sets = reactomeGS, 
+  view = "RNA",
+  sign = "negative"
+)
+```
+
+
+
+```{r}
+names(res.positive)
+
+```
+
+
+
+```{r}
+plot_enrichment_heatmap(res.positive)
+
+```
+
+
+
+```{r}
+plot_enrichment_heatmap(res.negative)
+
+```
+
+
+
+```{r}
+plot_enrichment(res.positive, factor = 7, max.pathways = 15)
+
+```
+
+```{r}
+
+plot_enrichment(res.negative, factor = 3, max.pathways = 15)
+
+```
+
+
+```{r}
+plot_enrichment_detailed(
+  enrichment.results = res.negative,
+  factor = 1, 
+  max.pathways = 3
+)
+```
+
+
+
+```{r}
+head(res.negative$sigPathways)
+head(res.negative$feature.statistics)
+head(res.negative$pval)
+head(res.negative$pval.adj)
+head(res.negative$feature.statistics)
+
+```
+
+
+```{r}
+# ==== MOFA Biomarker Extraction Pipeline ====
+
+# ---- Load Required Packages ----
+suppressPackageStartupMessages({
+  library(MOFA2); library(dplyr); library(tidyr); library(readr)
+  library(stringr); library(purrr); library(ggplot2)
+})
+
+# ---- 1) User Settings ----
+obj <- if (exists("MOFA_ens")) MOFA_ens else model  # Use MOFA_ens if available (Ensembl), otherwise use model
+factors_of_interest <- c(1, 3)                      # Main factors of interest
+top_n <- c(RNA = 200, miRNA = 100, Proteome = 150, Methyl = 200, Phospho = 150, Acetyl = 150)
+z_thresh <- 2.0                                     # Z-score selection threshold
+outdir <- "MOFA_biomarkers"
+dir.create(outdir, showWarnings = FALSE)
+
+# ---- 2) Extract Weights and Compute Rankings and Robust Z-scores ----
+wdf <- get_weights(obj, views = "all", factors = factors_of_interest, as.data.frame = TRUE) %>%
+  group_by(view, factor) %>%
+  mutate(
+    abs_weight = abs(value),
+    z = (value - median(value, na.rm = TRUE)) / mad(value, na.rm = TRUE),
+    rank_abs = row_number(desc(abs_weight)),
+    feature_clean = case_when(
+      view == "RNA" ~ str_remove(as.character(feature), "_RNA$"),
+      TRUE ~ as.character(feature)
+    )
+  ) %>%
+  ungroup()
+
+# ---- 3) Select Top-N Features per View (Default = 100 if Missing) ----
+top_tbl <- tibble(view = names(top_n), topN = as.integer(top_n))
+wdf <- wdf %>% left_join(top_tbl, by = "view") %>%
+  mutate(topN = ifelse(is.na(topN), 100L, topN))
+
+top_byN <- wdf %>%
+  group_by(view, factor) %>%
+  filter(rank_abs <= topN) %>%
+  ungroup() %>%
+  mutate(selection = "topN")
+
+# ---- 4) Additional Selection by Z-score ----
+top_byZ <- wdf %>% filter(abs(z) >= z_thresh) %>% mutate(selection = paste0("z>=", z_thresh))
+
+biomarkers <- bind_rows(top_byN, top_byZ) %>%
+  distinct(view, factor, feature, .keep_all = TRUE)
+
+# ---- 5) Determine Expression Direction (Up in EGFR Mutation vs No.Mutation) ----
+if (exists("meta_orig") && "egfr_mutation_info" %in% colnames(meta_orig)) {
+  # Simplify EGFR mutation categories
+  egfr_simple_vec <- setNames(
+    ifelse(meta_orig$egfr_mutation_info == "No.Mutation", "No.Mutation", "Mutation"),
+    rownames(meta_orig)
+  )
+  
+  # Retrieve factor values
+  f_long <- get_factors(obj, as.data.frame = TRUE)
+  f_long$EGFR_simple <- egfr_simple_vec[f_long$sample]
+  
+  dir_map <- f_long %>%
+    filter(factor %in% paste0("Factor", factors_of_interest)) %>%
+    group_by(factor, EGFR_simple) %>%
+    summarise(med = median(value, na.rm = TRUE), .groups = "drop") %>%
+    tidyr::pivot_wider(names_from = EGFR_simple, values_from = med) %>%
+    mutate(sign_map = ifelse(Mutation > `No.Mutation`, +1, -1)) %>%
+    select(factor, sign_map)
+  
+  biomarkers <- biomarkers %>%
+    left_join(dir_map, by = "factor") %>%
+    mutate(direction = case_when(
+      !is.na(sign_map) & value * sign_map > 0 ~ "Up in EGFR Mutation",
+      !is.na(sign_map) & value * sign_map < 0 ~ "Up in No.Mutation",
+      TRUE ~ NA_character_
+    ))
+}
+
+# ---- 6) Save Tables (Combined + Per Factor/View) and Gene Lists for DIABLO ----
+write_tsv(
+  biomarkers %>% arrange(factor, view, rank_abs),
+  file.path(outdir, "MOFA_biomarkers_combined.tsv")
+)
+
+split(biomarkers, list(biomarkers$factor, biomarkers$view), drop = TRUE) %>%
+  imap(function(df, key) {
+    fn <- paste0("biomarkers_", key[[1]], "_", key[[2]], ".tsv")
+    write_tsv(df %>% arrange(rank_abs), file.path(outdir, fn))
+  })
+
+# Export plain-text gene lists for DIABLO
+gl_dir <- file.path(outdir, "gene_lists_for_DIABLO")
+dir.create(gl_dir, showWarnings = FALSE)
+
+biomarkers %>%
+  group_by(factor, view) %>%
+  summarise(genes = list(unique(feature_clean)), .groups = "drop") %>%
+  pwalk(function(factor, view, genes) {
+    writeLines(sort(genes), file.path(gl_dir, paste0("genes_", factor, "_", view, ".txt")))
+  })
+
+# ---- 7) Consensus Features (Shared Between Factor1 and Factor3 per View) ----
+consensus <- biomarkers %>%
+  filter(factor %in% paste0("Factor", factors_of_interest)) %>%
+  group_by(view, feature_clean) %>%
+  summarise(
+    factors = paste(sort(unique(factor)), collapse = ","),
+    n_factors = n_distinct(factor),
+    any_up_mut = any(direction == "Up in EGFR Mutation", na.rm = TRUE),
+    any_up_no  = any(direction == "Up in No.Mutation", na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(n_factors >= 2)
+
+write_tsv(consensus, file.path(outdir, "consensus_biomarkers_F1_F3_by_view.tsv"))
+
+# ---- 8) Quick Summary Plot: Feature Counts per View/Factor ----
+counts <- biomarkers %>% count(factor, view)
+p <- ggplot(counts, aes(x = reorder(view, n), y = n, fill = view)) +
+  geom_col() + coord_flip() + facet_wrap(~factor, ncol = 2) +
+  labs(x = "View", y = "#Selected features", title = "Selected MOFA biomarkers per view/factor") +
+  theme_minimal(base_size = 12) + theme(legend.position = "none")
+
+ggsave(file.path(outdir, "counts_per_view_per_factor.pdf"), p, width = 9, height = 5)
+
+# ==== Output Summary ====
+# - MOFA_biomarkers/MOFA_biomarkers_combined.tsv          (Full biomarker table)
+# - MOFA_biomarkers/biomarkers_FactorX_ViewY.tsv          (Per-factor/view files)
+# - MOFA_biomarkers/gene_lists_for_DIABLO/*.txt           (Plain gene lists for DIABLO)
+# - MOFA_biomarkers/consensus_biomarkers_F1_F3_by_view.tsv (Shared features between F1 and F3)
+# - MOFA_biomarkers/counts_per_view_per_factor.pdf        (Visualization summary)
+
+```
+
+

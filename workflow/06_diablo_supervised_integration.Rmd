@@ -1,0 +1,570 @@
+---
+title: "MODA - Step 06 - DIABLO Supervised Integration"
+author: "Abdulaziz"
+date: "2025-09-27"
+output: html_document
+---
+
+
+```{r setup}
+suppressPackageStartupMessages({
+library(mixOmics)
+library(data.table)
+library(ggplot2)
+library(pROC)
+})
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+
+# ==== 1) Paths ====
+source("R/workflow_utils.R")
+cfg <- load_moda_paths()
+base_dir <- cfg$external_project_dir
+proc_dir <- cfg$external_processed_dir
+results_root <- if (nzchar(cfg$external_results_dir)) cfg$external_results_dir else file.path(base_dir, "results")
+res_dir  <- file.path(results_root, "diablo"); dir.create(res_dir, recursive=TRUE, showWarnings=FALSE)
+
+```
+
+
+
+```{r}
+# ==== 2) Load scaled matrices ====
+rna  <- readRDS(file.path(proc_dir,"rna","scaled.rds"))
+prot <- readRDS(file.path(proc_dir,"proteome","scaled.rds"))
+ph   <- readRDS(file.path(proc_dir,"phospho","scaled.rds"))
+meth <- readRDS(file.path(proc_dir,"methyl","scaled.rds"))
+mir  <- readRDS(file.path(proc_dir,"mirna","scaled.rds"))
+ac   <- readRDS(file.path(proc_dir,"acetyl","scaled.rds"))
+
+# Fix omics matrices (transpose)
+fix_matrix <- function(mat){
+  mat <- t(mat)                          # transpose
+  mat <- as.data.frame(mat)              # return data.frame
+  # make colnames = features, rownames = samples
+  return(mat)
+}
+
+rna  <- fix_matrix(rna)
+mir  <- fix_matrix(mir)
+prot <- fix_matrix(prot)
+ph   <- fix_matrix(ph)
+meth <- fix_matrix(meth)
+ac   <- fix_matrix(ac)
+```
+
+
+```{r}
+# ==== 3) Load metadata ====
+meta_orig <- as.data.frame(readRDS(file.path(proc_dir, "clinical", "meta_labels.rds")))
+sample_col <- if ("sample" %in% names(meta_orig)) "sample" else "sample_id"
+meta <- meta_orig
+rownames(meta) <- meta[[sample_col]]
+if (!"sample" %in% names(meta)) meta$sample <- meta[[sample_col]]
+
+# outcome column (e.g., EGFR mutation status)
+Y <- factor(meta$egfr_mutation_info)   # change column according to your target
+```
+
+
+```{r}
+# ---- 3) Ensure sample names across blocks match ----
+common_samples <- Reduce(intersect, list(
+  rownames(rna), rownames(mir), rownames(prot),
+  rownames(ph), rownames(meth), rownames(ac),
+  rownames(meta)
+))
+
+length(common_samples)  # should be > 0
+
+
+```
+
+```{r}
+
+# ---- 4) Subset and align row order ----
+rna  <- rna[common_samples, ]
+mir  <- mir[common_samples, ]
+prot <- prot[common_samples, ]
+ph   <- ph[common_samples, ]
+meth <- meth[common_samples, ]
+ac   <- ac[common_samples, ]
+meta <- meta[common_samples, ]
+
+stopifnot(all(rownames(meta) == rownames(rna)))
+
+```
+
+
+```{r}
+
+# ==== 5) List of blocks ====
+data.list <- list(
+  RNA     = rna,
+  miRNA   = mir,
+  Methyl  = meth,
+  Protein = prot,
+  Phospho = ph,
+  Acetyl  = ac
+)
+
+# ==== 6) Design matrix ====
+design <- matrix(0.1, ncol = length(data.list), nrow = length(data.list))
+diag(design) <- 0
+colnames(design) <- rownames(design) <- names(data.list)
+
+```
+
+
+
+```{r}
+# ==== 7) Tune keepX ====
+
+set.seed(123)
+
+tune_diablo <- tune.block.splsda(
+  X = data.list,
+  Y = Y,
+  ncomp = 3,   # number of components
+ test.keepX = list(
+    RNA     = c(50,150),
+    miRNA   = c(10,30),
+    Methyl  = c(50,100),
+    Protein = c(10,20),
+    Phospho = c(10,20),
+    Acetyl  = c(10,20)
+  ),
+  design = design,
+  validation = "Mfold",
+  folds = 5,
+  nrepeat = 5,
+  dist = "centroids.dist",
+  progressBar = TRUE
+)
+```
+
+
+
+```{r}
+saveRDS(tune_diablo, file.path(base_dir, "results/diablo/diablo_tune_colab.rds"))
+tune_diablo <- readRDS(file.path(base_dir, "results/diablo/diablo_tune_colab.rds"))
+
+```
+
+
+
+```{r}
+# ==== 6) Get best keepX ====
+best_keepX <- tune_diablo$choice.keepX
+print(best_keepX)
+```
+
+
+```{r}
+# ==== 7) Build final model with tuned keepX ====
+diablo_model <- block.splsda(
+  X = data.list,
+  Y = Y,
+  ncomp = 3,
+  design = design,
+  keepX = best_keepX
+)
+saveRDS(diablo_model, file.path(res_dir, "diablo_model_final.rds"))
+
+```
+
+
+```{r}
+perf_diablo <- perf(diablo_model, validation = "Mfold",
+                    folds = 5, nrepeat = 10, dist = "centroids.dist")
+saveRDS(perf_diablo, file.path(res_dir, "diablo_perf_final.rds"))
+
+```
+
+```{r}
+# Error rate per component
+pdf(file.path(res_dir, "perf_diablo.pdf"), 
+    width = 12,  
+    height = 10) 
+plot(perf_diablo)
+
+
+# Finish plotting and save the file
+dev.off()
+```
+
+```{r}
+perf_diablo$choice.ncomp$WeightedVote
+
+```
+
+
+
+```{r}
+plotDiablo(diablo_model, ncomp = 1)
+
+pdf(file.path(res_dir, "plotDiablo1.pdf"), 
+    width = 12,  
+    height = 10) 
+plotDiablo(diablo_model, ncomp = 1)
+
+
+# Finish plotting and save the file
+dev.off()
+
+pdf(file.path(res_dir, "plotDiablo2.pdf"), 
+    width = 12,  
+    height = 10) 
+plotDiablo(diablo_model, ncomp =2)
+
+
+# Finish plotting and save the file
+dev.off()
+
+pdf(file.path(res_dir, "plotDiablo3.pdf"), 
+    width = 12,  
+    height = 10) 
+plotDiablo(diablo_model, ncomp = 3)
+
+
+# Finish plotting and save the file
+dev.off()
+
+```
+
+```{r}
+plotIndiv("diablo_model")
+
+```
+
+
+```{r}
+# ==== 9) Extract and export selected features per block ====
+
+extract_block_features <- function(model, block_name, res_dir) {
+  sel <- selectVar(model, block = block_name)
+  
+  if (is.null(sel) || length(sel) == 0) {
+    message("⚠️ No features selected for block: ", block_name)
+    return(NULL)
+  }
+  
+  out_list <- list()
+  
+  for (comp in names(sel)) {
+    comp_df <- as.data.frame(sel[[comp]])
+    
+    # Auto-detect columns
+    cols <- tolower(names(comp_df))
+    if ("name" %in% cols) {
+      feat_col <- "name"
+    } else if ("names" %in% cols) {
+      feat_col <- "names"
+    } else {
+      feat_col <- names(comp_df)[1]  # fallback to first column
+    }
+    
+    if ("value" %in% cols) {
+      val_col <- "value"
+    } else if ("loading" %in% cols) {
+      val_col <- "loading"
+    } else if (ncol(comp_df) > 1) {
+      val_col <- names(comp_df)[2]
+    } else {
+      val_col <- NA
+    }
+    
+    comp_df$feature   <- comp_df[[feat_col]]
+    comp_df$component <- comp
+    comp_df$weight    <- if (!is.na(val_col)) comp_df[[val_col]] else NA_real_
+    
+    out_list[[comp]] <- comp_df[, c("feature", "weight", "component")]
+  }
+  
+  df <- data.table::rbindlist(out_list, use.names = TRUE, fill = TRUE)
+  data.table::fwrite(df, file.path(res_dir, paste0("DIABLO_sel_", block_name, ".csv")))
+  
+  message("✅ Saved: ", paste0("DIABLO_sel_", block_name, ".csv"),
+          " (", nrow(df), " features)")
+  return(df)
+}
+
+# Extract for each block
+sel_rna   <- extract_block_features(diablo_model, "RNA", res_dir)
+sel_mirna <- extract_block_features(diablo_model, "miRNA", res_dir)
+sel_meth  <- extract_block_features(diablo_model, "Methyl", res_dir)
+sel_prot  <- extract_block_features(diablo_model, "Protein", res_dir)
+sel_ph    <- extract_block_features(diablo_model, "Phospho", res_dir)
+sel_ac    <- extract_block_features(diablo_model, "Acetyl", res_dir)
+
+
+```
+
+
+```{r}
+plotIndiv(
+  diablo_model,
+  comp = c(1, 2),
+  group = diablo_model$Y,
+  legend = TRUE,
+  title = "DIABLO: Individuals (Samples) — Comp 1 vs 2" ,
+ind.names = FALSE
+)
+
+pdf(file.path(res_dir, "plotIndiv 1_3.pdf"), 
+    width = 12,  
+    height = 10) 
+plotIndiv(
+  diablo_model,
+  comp = c(1, 3),
+  group = diablo_model$Y,
+  legend = TRUE,
+  title = "DIABLO: Individuals (Samples) — Comp 1 vs 3" ,
+ind.names = FALSE
+)
+# Finish plotting and save the file
+dev.off()
+
+```
+
+
+```{r}
+plotVar(
+  diablo_model,
+  comp = c(1, 2),
+  var.names = F,
+  legend = TRUE,
+  style = "graphics",
+  title = "DIABLO: Correlation circle plot"
+)
+
+pdf(file.path(res_dir, "plotVar 1_3.pdf"), 
+    width = 12,  
+    height = 10) 
+
+plotVar(
+  diablo_model,
+  comp = c(1, 3),
+  var.names = F,
+  legend = TRUE,
+  style = "graphics",
+  title = "DIABLO: Correlation circle plot"
+)
+# Finish plotting and save the file
+dev.off()
+
+```
+
+
+```{r}
+plotLoadings(
+  diablo_model,
+  comp = 1,
+  contrib = "max",
+  method = "mean",
+  ndisplay = 20,
+  title = "Top loadings (Component 1)"
+)
+
+
+pdf(file.path(res_dir, "plotLoadings_3.pdf"), 
+    width = 12,  
+    height = 10) 
+
+plotLoadings(
+  diablo_model,
+  comp = 3,
+  contrib = "max",
+  method = "mean",
+  ndisplay = 20,
+  title = "Top loadings (Component 1)"
+)
+# Finish plotting and save the file
+dev.off()
+
+```
+
+```{r}
+plotArrow(diablo_model, ind.names = FALSE, legend = TRUE, 
+          title = 'DIABLO comp 1 - 2')
+pdf(file.path(res_dir, "plotArrow.pdf"), 
+    width = 12,  
+    height = 10) 
+
+plotArrow(diablo_model, ind.names = FALSE, legend = TRUE, 
+          title = 'DIABLO comp 1 - 2')
+# Finish plotting and save the file
+dev.off()
+```
+
+```{r}
+circosPlot(diablo_model, cutoff = 0.7, line = TRUE, 
+           color.blocks = c('darkorchid', 'brown1', 'lightgreen','blue','yellow','orange'),
+           color.cor = c("chocolate3","grey20"), size.labels = 1.5)
+
+pdf(file.path(res_dir, "circosPlot9.pdf"), 
+    width = 12,  
+    height = 10) 
+circosPlot(diablo_model, cutoff = 0.9, line = TRUE, 
+           color.blocks = c('darkorchid', 'brown1', 'lightgreen','blue','yellow','orange'),
+           color.cor = c("chocolate3","grey20"), size.labels = 1.5)
+
+# Finish plotting and save the file
+dev.off()
+```
+
+
+```{r}
+png("cimDiablo_plot.png")
+cimDiablo(diablo_model, color.blocks = c('darkorchid', 'brown1', 'lightgreen','blue','yellow','orange'),
+          comp = 1, margin = c(8, 20), legend.position = "right")
+
+pdf(file.path(res_dir, "cimDiablo3.pdf"), 
+    width = 12,  
+    height = 10) 
+
+cimDiablo(diablo_model, color.blocks = c('darkorchid', 'brown1', 'lightgreen','blue','yellow','orange'),
+          comp = 3, margin = c(8, 20), legend.position = "right")
+# Finish plotting and save the file
+dev.off()
+```
+
+```{r}
+network(
+  diablo_model,
+  comp = 1,
+  threshold = 0.7,
+  title = "DIABLO Network (comp1, corr > 0.7)"
+)
+pdf(file.path(res_dir, "network1.pdf"), 
+    width = 12,  
+    height = 10) 
+
+network(
+  diablo_model,
+  comp = 1,
+  threshold = 0.7,
+  title = "DIABLO Network (comp1, corr > 0.7)"
+)
+# Finish plotting and save the file
+dev.off()
+```
+
+
+```{r}
+perf_diablo$MajorityVote.error.rate
+
+```
+
+
+```{r}
+perf_diablo$WeightedVote.error.rate
+
+```
+
+
+```{r}
+
+pdf(file.path(res_dir, "auroc3_Proteome.pdf"), 
+    width = 12,  
+    height = 10) 
+
+auroc(diablo_model, roc.block = "Proteome", roc.comp =3,
+                   print = FALSE)
+# Finish plotting and save the file
+dev.off()
+
+pdf(file.path(res_dir, "auroc3_Phospho.pdf"), 
+    width = 12,  
+    height = 10) 
+
+auroc(diablo_model, roc.block = "Phospho", roc.comp =3,
+                   print = FALSE)
+# Finish plotting and save the file
+dev.off()
+
+pdf(file.path(res_dir, "auroc3_Methyl.pdf"), 
+    width = 12,  
+    height = 10) 
+
+auroc(diablo_model, roc.block = "Methyl", roc.comp =3,
+                   print = FALSE)
+# Finish plotting and save the file
+dev.off()
+
+pdf(file.path(res_dir, "auroc3_miRNA.pdf"), 
+    width = 12,  
+    height = 10) 
+
+auroc(diablo_model, roc.block = "miRNA", roc.comp =3,
+                   print = FALSE)
+# Finish plotting and save the file
+dev.off()
+
+pdf(file.path(res_dir, "auroc3_Acetyl.pdf"), 
+    width = 12,  
+    height = 10) 
+
+auroc(diablo_model, roc.block = "Acetyl", roc.comp =3,
+                   print = FALSE)
+# Finish plotting and save the file
+dev.off()
+
+
+```
+
+
+```{r}
+library(ggplot2)
+library(pROC)
+
+# your blocks
+blocks <- c("RNA", "Proteome", "Phospho", "Methyl", "miRNA", "Acetyl")
+
+# compute ROC for each block
+roc_list <- list()
+for (blk in blocks) {
+  res <- auroc(diablo_model, roc.block = blk, roc.comp = 3, print = FALSE)
+  # extract the first component (adjust if needed)
+  roc_obj <- res[[blk]][[1]]
+  roc_list[[blk]] <- roc_obj
+}
+
+# bind into a single DataFrame
+roc_data <- do.call(rbind, lapply(names(roc_list), function(blk) {
+  roc_obj <- roc_list[[blk]]
+  data.frame(
+    FPR = 1 - roc_obj$specificities,
+    TPR = roc_obj$sensitivities,
+    Block = blk,
+    AUC = round(as.numeric(roc_obj$auc), 3)
+  )
+}))
+
+# plot using ggplot2
+p <- ggplot(roc_data, aes(x = FPR, y = TPR, color = Block)) +
+  geom_line(size = 1.2) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "black") +
+  scale_color_brewer(palette = "Dark2") +
+  labs(
+    title = "ROC Curves for All Omics (Comp 3)",
+    x = "1 - Specificity (%)",
+    y = "Sensitivity (%)",
+    color = "Omic Block"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+# add AUC values into legend
+auc_labels <- sapply(split(roc_data, roc_data$Block), function(df) unique(df$AUC))
+auc_labels <- paste(names(auc_labels), ": AUC =", auc_labels)
+p <- p + scale_color_discrete(name = "Outcome", labels = auc_labels)
+
+# save plot
+ggsave(file.path(res_dir, "auroc_all_omics_combined.pdf"), p, width = 10, height = 8)
+

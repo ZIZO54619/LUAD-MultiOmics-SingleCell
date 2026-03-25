@@ -1,0 +1,302 @@
+---
+title: "MODA - Step 04 - Single-Omics Baseline"
+author: "Abdulaziz"
+date: "2025-09-17"
+output: html_document
+---
+
+
+
+```{r}
+# ===== حِزم أساسية (بسيطة) =====
+need <- c("data.table","ggplot2","limma","msigdbr","pheatmap","knitr","matrixStats","arrow")
+inst <- need[!need %in% installed.packages()[,1]]
+if(length(inst)) install.packages(inst, repos="https://cloud.r-project.org")
+suppressPackageStartupMessages({
+  library(data.table); library(ggplot2); library(limma)
+  library(msigdbr); library(pheatmap); library(knitr)
+  library(matrixStats); library(arrow)
+})
+
+# Bioconductor لـ GSVA الجديدة (Param API)
+if (!requireNamespace("BiocManager", quietly=TRUE)) install.packages("BiocManager")
+if (!requireNamespace("GSVA", quietly=TRUE)) BiocManager::install("GSVA", ask=FALSE, update=FALSE)
+library(GSVA)
+```
+
+
+```{r}
+# ===== Paths =====
+source("R/workflow_utils.R")
+cfg <- load_moda_paths()
+base_dir <- cfg$external_project_dir
+proc_dir <- cfg$external_processed_dir
+results_root <- if (nzchar(cfg$external_results_dir)) cfg$external_results_dir else file.path(base_dir, "results")
+res_fig  <- file.path(results_root,"figures"); dir.create(res_fig, recursive=TRUE, showWarnings=FALSE)
+res_tab  <- file.path(results_root,"tables");  dir.create(res_tab, recursive=TRUE, showWarnings=FALSE)
+res_sig  <- file.path(results_root,"signatures"); dir.create(res_sig, recursive=TRUE, showWarnings=FALSE)
+
+# (اختياري) تنظيف قديم:
+# unlink(list.files(res_tab, full.names=TRUE), force=TRUE)
+# unlink(list.files(res_sig, full.names=TRUE), force=TRUE)
+
+# ===== Load matrices (من Step02) =====
+layers <- c("rna","proteome","phospho","mirna","methyl","acetyl")
+mat_scaled <- setNames(vector("list", length(layers)), layers)
+for (L in layers) {
+  mat_scaled[[L]] <- readRDS(file.path(proc_dir, L, "scaled.rds"))
+}
+common_samples <- colnames(mat_scaled[[1]])
+
+# ===== Clinical labels =====
+meta <- readRDS(file.path(proc_dir,"clinical","meta_labels.rds"))
+meta <- meta[match(common_samples, meta$sample_id), , drop=FALSE]
+stopifnot(identical(common_samples, meta$sample_id))  # تأكيد تطابق ترتيب العينات
+```
+
+
+```{r}
+# ===== Utilities بسيطة =====
+save_tbl <- function(df, name) write.csv(df, file.path(res_tab, name), row.names=FALSE)
+
+volcano <- function(tt, title="Volcano", lfc=1, fdr=0.05){
+  df <- data.frame(logFC=tt$logFC, FDR=tt$adj.P.Val)
+  ggplot(df, aes(logFC, -log10(pmax(FDR,1e-300)))) +
+    geom_point(size=0.8) +
+    geom_vline(xintercept=c(-lfc,lfc), linetype=2) +
+    geom_hline(yintercept=-log10(fdr), linetype=2) +
+    labs(title=title, x="log2FC", y="-log10(FDR)")
+}
+
+run_limma <- function(m, group_vec){
+  g <- factor(group_vec); stopifnot(length(levels(g))==2)
+  design <- model.matrix(~0+g); colnames(design) <- levels(g)
+  fit <- lmFit(m, design)
+  cont <- makeContrasts(contrasts=paste0(levels(g)[2],"-",levels(g)[1]), levels=design)
+  fit2 <- eBayes(contrasts.fit(fit, cont))
+  tt <- topTable(fit2, number=Inf, sort.by="P")
+  tt$feature <- rownames(tt)
+  tt
+}
+
+# ===== GSVA (Param API) — تغليف بسيط ومتوافق =====
+filter_sets <- function(gslist, genes, min_size=10, max_size=1000){
+  gs2 <- lapply(gslist, function(gs) intersect(gs, genes))
+  lens <- vapply(gs2, length, integer(1))
+  gs2[lens >= min_size & lens <= max_size]
+}
+prep_for_gsva <- function(m){
+  m <- as.matrix(m); m[!is.finite(m)] <- NA
+  keep <- rowSums(is.finite(m)) >= 2
+  m <- m[keep,,drop=FALSE]
+  m <- m[rowSds(m, na.rm=TRUE) > 0, , drop=FALSE]
+  if (any(duplicated(rownames(m)))){
+    idx <- split(seq_len(nrow(m)), rownames(m))
+    m <- do.call(rbind, lapply(idx, function(ix) colMeans(m[ix,,drop=FALSE], na.rm=TRUE)))
+  }
+  if (anyNA(m)){
+    rm <- rowMeans(m, na.rm=TRUE); rows_na <- which(rowSums(is.na(m))>0)
+    for (i in rows_na) m[i, is.na(m[i,])] <- rm[i]
+  }
+  m
+}
+.pick_args <- function(fun, args_list){
+  fmls <- try(formals(fun), silent=TRUE); if (inherits(fmls,"try-error") || is.null(fmls)) return(list())
+  args_list[intersect(names(args_list), names(fmls))]
+}
+.make_param <- function(method=c("gsva","ssgsea","zscore","plage"), m, gslist,
+                        kcdf="Gaussian", min_size=10, max_size=1000, mx.diff=TRUE){
+  method <- match.arg(method)
+  m <- prep_for_gsva(m)
+  gslist <- filter_sets(gslist, rownames(m), min_size, max_size)
+  common_args <- list(
+    exprData=m, expr=m,
+    geneSets=gslist, gset.idx.list=gslist,
+    kcdf=kcdf, minSize=min_size, maxSize=max_size,
+    mxDiff=mx.diff, mx.diff=mx.diff
+  )
+  if (method=="gsva"){
+    do.call(GSVA::gsvaParam, .pick_args(GSVA::gsvaParam, common_args))
+  } else if (method=="ssgsea"){
+    common_args$absRanking <- TRUE
+    do.call(GSVA::ssgseaParam, .pick_args(GSVA::ssgseaParam, common_args))
+  } else if (method=="zscore"){
+    do.call(GSVA::zscoreParam, .pick_args(GSVA::zscoreParam, common_args))
+  } else {
+    do.call(GSVA::plageParam,  .pick_args(GSVA::plageParam,  common_args))
+  }
+}
+run_gsva_param <- function(m, gslist, method=c("gsva","ssgsea","zscore","plage"),
+                           min_size=10, max_size=1000){
+  method <- match.arg(method)
+  param <- .make_param(method, m, gslist, min_size=min_size, max_size=max_size)
+  args <- list(param=param)
+  if (requireNamespace("BiocParallel", quietly=TRUE) &&
+      "BPPARAM" %in% names(formals(GSVA::gsva))){
+    args$BPPARAM <- BiocParallel::SerialParam()
+  }
+  as.matrix(do.call(GSVA::gsva, args))
+}
+
+```
+
+
+```{r}
+stopifnot("type" %in% names(meta))
+sel <- which(meta$type %in% c("NAT","Tumor"))
+group <- droplevels(factor(meta$type[sel], levels=c("NAT","Tumor")))
+
+results_de <- list(); sig_counts <- c()
+for (L in layers){
+  m <- mat_scaled[[L]][, sel, drop=FALSE]
+  tt <- run_limma(m, group)
+  results_de[[L]] <- tt
+  save_tbl(tt, paste0("DE_", toupper(L), "_Tumor_vs_NAT.csv"))
+  print(volcano(tt, title=paste(toupper(L),"• Tumor vs NAT")))
+  sig_counts[L] <- sum(tt$adj.P.Val <= 0.05)
+}
+kable(data.frame(layer=names(sig_counts), n_sig_FDR_0.05=sig_counts),
+      caption="عدد الميزات الدالّة (FDR≤0.05) — Tumor vs NAT")
+
+```
+```{r}
+# Gene sets من msigdbr
+hms <- msigdbr(species="Homo sapiens", category="H")[,c("gs_name","gene_symbol")]
+react <- msigdbr(species="Homo sapiens", category="C2", subcategory="CP:REACTOME")[,c("gs_name","gene_symbol")]
+to_list <- function(df) split(df$gene_symbol, df$gs_name)
+gs_h <- to_list(hms); gs_r <- to_list(react)
+
+# RNA scores
+rna <- mat_scaled$rna
+rna_gsva_h <- run_gsva_param(rna, gs_h, method="gsva",  min_size=10)
+rna_gsva_r <- run_gsva_param(rna, gs_r, method="gsva",  min_size=10)
+saveRDS(list(rna_h=rna_gsva_h, rna_react=rna_gsva_r), file.path(res_sig,"gsva_rna.rds"))
+
+# Proteome (لو rownames رموز جينية)
+prot <- mat_scaled$proteome
+prot_gsva_h <- run_gsva_param(prot, gs_h, method="gsva", min_size=10)
+saveRDS(prot_gsva_h, file.path(res_sig,"gsva_proteome_hallmark.rds"))
+```
+
+
+```{r}
+# Boxplots لبعض المسارات
+box_one <- function(scores, set_name, title){
+  sc <- scores[set_name, , drop=TRUE]
+  df <- data.frame(score=sc, group=meta$type[colnames(scores)])
+  ggplot(df, aes(group, score)) + geom_boxplot(outlier.size=0.6) +
+    labs(title=paste(title, "•", set_name), x=NULL, y="score")
+}
+print(box_one(rna_gsva_h, "HALLMARK_E2F_TARGETS", "RNA"))
+print(box_one(rna_gsva_h, "HALLMARK_INTERFERON_GAMMA_RESPONSE", "RNA"))
+```
+
+
+```{r}
+# اختار أعلى 30 مسار متغير
+top_var <- head(order(matrixStats::rowVars(rna_gsva_h), decreasing = TRUE),
+                min(30, nrow(rna_gsva_h)))
+
+# ابني annotation صح باستخدام match على sample_id
+samp <- colnames(rna_gsva_h)
+ann_type <- meta$type[match(samp, meta$sample_id)]   # ← دي المهمة
+# sanity check
+table(ann_type, useNA = "ifany")
+
+# حوّله لفـاكتر بمستويات مرتّبة
+anno <- data.frame(type = factor(ann_type, levels = c("NAT","Tumor")))
+rownames(anno) <- samp
+
+# ألوان اختيارية (علشان يبقى واضح)
+ann_cols <- list(type = c(NAT="#66bd63", Tumor="#ef3b2c"))
+
+# ارسم
+pheatmap::pheatmap(
+  scale(t(rna_gsva_h[top_var, , drop = FALSE])),
+  annotation_col   = anno,
+  annotation_colors= ann_cols,
+  show_colnames    = FALSE,
+  main             = "RNA • GSVA Hallmarks (Top variable)"
+)
+
+```
+
+```{r}
+run_contrast <- function(L, label, keep_levels=NULL){
+  if(!label %in% names(meta)) return(invisible(NULL))
+  y <- meta[[label]]
+  if(!is.null(keep_levels)) y[!y %in% keep_levels] <- NA
+  ok <- which(!is.na(y)); y <- droplevels(factor(y[ok]))
+  if(length(levels(y))!=2 || min(table(y))<20) return(invisible(NULL))
+  m <- mat_scaled[[L]][, ok, drop=FALSE]
+  tt <- run_limma(m, y)
+  nm <- paste0("DE_", toupper(L), "_", label, "_", levels(y)[2], "_vs_", levels(y)[1], ".csv")
+  save_tbl(tt, nm); print(volcano(tt, title=paste(toupper(L), "•", label)))
+  return(tt)
+}
+# أمثلة:
+res_stage_prot  <- run_contrast("proteome", "stage_bin", c("Early","Late"))
+res_egfr_phosph <- run_contrast("phospho",  "egfr_classic_vs_other", c("Classic","NonClassic"))
+
+```
+
+```{r}
+acc_files <- list.files(res_tab, pattern="^DE_.*Tumor_vs_NAT.*csv$", full.names=TRUE)
+sum_sig <- sapply(acc_files, function(p) sum(read.csv(p)$adj.P.Val <= 0.05))
+kable(data.frame(file=basename(acc_files), n_sig=sum_sig),
+      caption="Tumor vs NAT — عدد الميزات الدالّة (FDR≤0.05)")
+
+```
+```{r}
+# اختَر سمبلّات الـscores
+samp  <- colnames(rna_gsva_h)
+group <- factor(meta$type[match(samp, meta$sample_id)], levels=c("NAT","Tumor"))
+
+box_one2 <- function(scores, set_name, title="RNA"){
+  sc <- as.numeric(scores[set_name, samp])
+  df <- data.frame(score=sc, group=group)
+  ggplot(df, aes(group, score)) + geom_boxplot(outlier.size=0.6) +
+    labs(title=paste(title, "•", set_name), x=NULL, y="GSVA score")
+}
+# أمثلة:
+box_one2(rna_gsva_h, "HALLMARK_E2F_TARGETS", "RNA")
+box_one2(rna_gsva_h, "HALLMARK_INTERFERON_GAMMA_RESPONSE", "RNA")
+
+```
+
+
+```{r}
+tt_path <- function(scores, g=group){
+  keep <- !is.na(g); sc <- scores[, keep, drop=FALSE]; g <- droplevels(g[keep])
+  p <- apply(sc, 1, function(x) t.test(x[g=="Tumor"], x[g=="NAT"])$p.value)
+  d <- apply(sc, 1, function(x) mean(x[g=="Tumor"]) - mean(x[g=="NAT"]))
+  data.frame(pathway=rownames(sc), delta=d, fdr=p.adjust(p,"BH"))
+}
+res_h_rna <- tt_path(rna_gsva_h, group)
+knitr::kable(head(res_h_rna[order(res_h_rna$fdr),], 15),
+             caption="Top RNA Hallmarks (Tumor vs NAT)")
+
+```
+
+```{r}
+count_sig <- function(tt, lfc=0.5, fdr=0.05){
+  sum(tt$adj.P.Val <= fdr & abs(tt$logFC) >= lfc)
+}
+sapply(results_de, count_sig)  # يشجّعك تختار عتبة مناسبة للعرض
+
+
+```
+
+```{r}
+top_var <- head(order(matrixStats::rowVars(rna_gsva_h), decreasing=TRUE), 30)
+samp <- colnames(rna_gsva_h)
+anno <- data.frame(type=factor(meta$type[match(samp, meta$sample_id)], levels=c("NAT","Tumor")))
+rownames(anno) <- samp
+ann_cols <- list(type=c(NAT="#66bd63", Tumor="#ef3b2c"))
+
+pheatmap::pheatmap(scale(t(rna_gsva_h[top_var, , drop=FALSE])),
+                   annotation_col=anno, annotation_colors=ann_cols,
+                   show_colnames=FALSE, main="RNA • GSVA Hallmarks (Top variable)")
+
+```
+

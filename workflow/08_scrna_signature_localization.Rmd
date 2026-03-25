@@ -1,0 +1,289 @@
+---
+title: "MODA - Step 08 - scRNA Signature Localization"
+author: "Abdulaziz"
+output: html_document
+---
+
+## Setup
+
+```{r}
+# =============================================================
+# scRNA-seq | MOFA×DIABLO Intersection Signature Scoring (Seurat)
+# -------------------------------------------------------------
+# What this script does (fast + presentation-ready outputs):
+#  1) Loads a Seurat object and a text file with the 50-gene intersection.
+#  2) Builds a per-cell module score (IntersectSig1) using AddModuleScore.
+#  3) Auto-detects a cell-type column and makes:
+#       - UMAP FeaturePlot (grey→red)
+#       - Violin plot by cell type (ordered by mean)
+#       - Bar chart of mean score per cell type
+#       - DotPlot for signature genes across cell types
+#  4) Computes Hallmark ANGIOGENESIS score (msigdbr) and correlates with the signature.
+#       - Scatter with Spearman ρ and p-value
+#  5) If metadata has EGFR_status → Violin plot by EGFR_status (mutant vs wildtype).
+#  6) Saves all figures (PNG + a compact PDF) and a summary TSV.
+#  7) Saves an updated Seurat object with the new metadata columns.
+# -------------------------------------------------------------
+# How to run:
+#   - Set the paths in the "CONFIG" section and source the file in R, e.g.:
+#       source("scRNA_module_score_pipeline.R")
+#   - Or run line-by-line in RStudio.
+# -------------------------------------------------------------
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(ggplot2)
+  library(dplyr)
+  library(patchwork)
+  library(msigdbr)
+  library(cowplot)
+})
+
+set.seed(42)
+```
+
+## CONFIG
+
+```{r}
+# ------------------------- CONFIG ----------------------------
+source("R/workflow_utils.R")
+cfg <- load_moda_paths()
+# Path to Seurat object (.rds)
+object_path   <- cfg$external_scRNA_object
+# Path to the final public intersection (one gene symbol per line)
+signature_path <- cfg$public_signature_file
+# Output directory for figures/tables
+out_dir       <- file.path(cfg$repo_root, "results", "runtime_scrna")
+# Resolution to use for UMAP plots
+feature_cols  <- c("lightgrey", "red")
+# -------------------------------------------------------------
+```
+
+## Helpers
+
+```{r}
+# Helpers ------------------------------------------------------
+msg <- function(...) cat(sprintf("[%s] ", format(Sys.time(), "%H:%M:%S")), sprintf(...), "\n")
+ensure_dir <- function(d) if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+
+ensure_dir(out_dir)
+```
+
+## 1) Load data
+
+```{r}
+# 1) Load data -------------------------------------------------
+stopifnot(file.exists(object_path))
+stopifnot(file.exists(signature_path))
+
+msg("Loading Seurat object: %s", object_path)
+obj <- readRDS(object_path)
+if (!inherits(obj, "Seurat")) stop("Loaded object is not a Seurat object.")
+
+DefaultAssay(obj) <- if ("RNA" %in% Assays(obj)) "RNA" else DefaultAssay(obj)
+
+# Ensure reductions exist (UMAP); if missing we do quick PCA+UMAP
+if (!"umap" %in% Reductions(obj)) {
+  msg("UMAP not found → running quick PCA+UMAP (RNA slot)...")
+  obj <- NormalizeData(obj, verbose = FALSE)
+  obj <- FindVariableFeatures(obj, verbose = FALSE)
+  obj <- ScaleData(obj, verbose = FALSE)
+  obj <- RunPCA(obj, npcs = 30, verbose = FALSE)
+  obj <- RunUMAP(obj, dims = 1:30, verbose = FALSE)
+}
+```
+
+## 2) Load signature genes
+
+```{r}
+# 2) Load signature genes -------------------------------------
+msg("Reading signature genes from: %s", signature_path)
+raw_genes <- unique(trimws(readLines(signature_path)))
+raw_genes <- raw_genes[nzchar(raw_genes)]
+
+# Harmonize case with object rownames (usually gene symbols)
+obj_genes   <- rownames(obj)
+# Try matching case-insensitively, then map back to object symbols
+map_to_obj <- function(g, obj_syms) {
+  # return the exact symbol from obj that matches (case-insensitive)
+  hits <- match(toupper(g), toupper(obj_syms))
+  obj_syms[hits]
+}
+
+mapped <- map_to_obj(raw_genes, obj_genes)
+intersect_genes <- unique(na.omit(mapped))
+
+msg("Signature genes provided: %d | Found in object: %d", length(raw_genes), length(intersect_genes))
+if (length(intersect_genes) < 5) {
+  warning("Fewer than 5 genes from the signature were found in the object. Check gene symbol version/species.")
+}
+```
+
+## 3) Compute module score
+
+```{r}
+# 3) Compute module score -------------------------------------
+msg("Computing AddModuleScore (IntersectSig1)...")
+obj <- AddModuleScore(obj, features = list(intersect_genes), name = "IntersectSig")
+# Seurat names it IntersectSig1 by default
+if (!"IntersectSig1" %in% colnames(obj@meta.data)) stop("AddModuleScore failed to create IntersectSig1.")
+```
+
+## 4) Pick a cell-type column
+
+```{r}
+# 4) Pick a cell-type column ----------------------------------
+priority_cols <- c(
+  "celltype", "cell_type", "celltype_major", "celltypes", "celltype.l1", "celltype.l2",
+  "annotation", "predicted.id", "major_type", "cell_class", "cell_annotation", "seurat_clusters"
+)
+celltype_col <- intersect(priority_cols, colnames(obj@meta.data))
+celltype_col <- if (length(celltype_col)) celltype_col[1] else NULL
+
+if (is.null(celltype_col)) {
+  msg("No obvious cell-type column found. Using seurat_clusters as a fallback.")
+  if (!"seurat_clusters" %in% colnames(obj@meta.data)) {
+    obj <- FindNeighbors(obj, dims = 1:30, verbose = FALSE)
+    obj <- FindClusters(obj, resolution = 0.5, verbose = FALSE)
+  }
+  celltype_col <- "seurat_clusters"
+}
+msg("Using cell-type column: %s", celltype_col)
+```
+
+## 5) Presentation-ready plots
+
+```{r}
+# 5) Figures: FeaturePlot/Violin/Bar/DotPlot -------------------
+msg("Making presentation-ready plots...")
+
+p_feature <- FeaturePlot(obj, features = "IntersectSig1", reduction = "umap", cols = feature_cols) +
+  ggtitle("Intersection signature score (per cell)") + theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# order groups by mean score
+meta_df <- obj@meta.data |> 
+  mutate(.celltype = .data[[celltype_col]]) |>
+  mutate(.celltype = as.factor(.celltype)) |>
+  mutate(.score = .data[["IntersectSig1"]])
+
+group_means <- meta_df |>
+  group_by(.celltype) |>
+  summarize(mean_score = mean(.score, na.rm = TRUE), .groups = "drop") |>
+  arrange(desc(mean_score))
+
+meta_df$.celltype <- factor(meta_df$.celltype, levels = group_means$.celltype)
+
+p_violin <- ggplot(meta_df, aes(x = .celltype, y = .score)) +
+  geom_violin(scale = "width") +
+  geom_boxplot(width = 0.15, outlier.size = 0.2) +
+  labs(x = NULL, y = "IntersectSig1", title = "Signature score by cell type") +
+  theme_bw(base_size = 11) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p_bar <- ggplot(group_means, aes(x = .celltype, y = mean_score)) +
+  geom_col() +
+  labs(x = NULL, y = "Mean IntersectSig1", title = "Mean signature score per cell type") +
+  theme_bw(base_size = 11) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# DotPlot across top signature genes (limit to 25 not to clutter)
+show_genes <- intersect_genes[intersect_genes %in% rownames(obj)]
+if (length(show_genes) > 25) show_genes <- show_genes[1:25]
+
+p_dot <- tryCatch({
+  DotPlot(obj, features = show_genes, group.by = celltype_col) +
+    RotatedAxis() + labs(title = "Signature genes across cell types")
+}, error = function(e) {
+  msg("DotPlot failed: %s", e$message)
+  NULL
+})
+```
+
+## 6) Hallmark ANGIOGENESIS + correlation
+
+```{r}
+# 6) Hallmark ANGIOGENESIS score + correlation ----------------
+msg("Scoring HALLMARK_ANGIOGENESIS via msigdbr + AddModuleScore...")
+msig_h <- msigdbr(species = "Homo sapiens", category = "H")
+angiogen <- msig_h |> filter(gs_name == "HALLMARK_ANGIOGENESIS") |> distinct(gene_symbol) |> pull(gene_symbol)
+angiogen_mapped <- map_to_obj(angiogen, rownames(obj)) |> unique() |> na.omit()
+
+obj <- AddModuleScore(obj, features = list(angiogen_mapped), name = "HALLMARK_ANGIOGENESIS")
+if (!"HALLMARK_ANGIOGENESIS1" %in% colnames(obj@meta.data)) warning("Hallmark score column missing.")
+
+corr_df <- obj@meta.data |>
+  transmute(IntersectSig1 = .data[["IntersectSig1"]], ANGIO = .data[["HALLMARK_ANGIOGENESIS1"]]) |>
+  filter(is.finite(IntersectSig1), is.finite(ANGIO))
+
+spear <- suppressWarnings(cor.test(corr_df$IntersectSig1, corr_df$ANGIO, method = "spearman"))
+rho <- unname(spear$estimate)
+pv  <- spear$p.value
+
+p_scatter <- ggplot(corr_df, aes(x = IntersectSig1, y = ANGIO)) +
+  geom_point(alpha = 0.3, size = 0.6) +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE) +
+  annotate("text", x = Inf, y = -Inf, hjust = 1.1, vjust = -0.8,
+           label = sprintf("Spearman rho=%.2f\np=%.2g", rho, pv)) +
+  labs(x = "IntersectSig1", y = "Hallmark ANGIO score", title = "Signature vs. Angiogenesis (per cell)") +
+  theme_bw(base_size = 11)
+```
+
+## 7) EGFR-status violin (optional)
+
+```{r}
+# 7) EGFR-status violin (if available) ------------------------
+plot_egfr <- NULL
+if ("EGFR_status" %in% colnames(obj@meta.data)) {
+  msg("EGFR_status detected → plotting by EGFR_status...")
+  egfr_df <- obj@meta.data |>
+    transmute(EGFR_status = as.factor(.data[["EGFR_status"]]), IntersectSig1 = .data[["IntersectSig1"]]) |>
+    filter(!is.na(EGFR_status))
+  plot_egfr <- ggplot(egfr_df, aes(x = EGFR_status, y = IntersectSig1, fill = EGFR_status)) +
+    geom_violin(trim = FALSE, alpha = 0.7, color = NA) +
+    geom_boxplot(width = 0.15, outlier.size = 0.2) +
+    theme_bw(base_size = 11) + labs(x = NULL, y = "IntersectSig1", title = "Signature by EGFR status") +
+    theme(legend.position = "none")
+}
+```
+
+## 8) Save figures
+
+```{r}
+# 8) Save figures ---------------------------------------------
+msg("Saving figures to: %s", out_dir)
+
+save_plot <- function(p, file, w=7, h=6) if (!is.null(p)) ggsave(filename = file.path(out_dir, file), plot = p, width = w, height = h, dpi = 300)
+
+save_plot(p_feature, "01_umap_intersectsig.png")
+save_plot(p_violin,  "02_violin_by_celltype_intersectsig.png", w=9, h=5.5)
+save_plot(p_bar,     "03_bar_mean_by_celltype_intersectsig.png", w=9, h=5.5)
+save_plot(p_dot,     "04_dotplot_signature_genes.png", w=10, h=6)
+save_plot(p_scatter, "05_scatter_intersect_vs_hallmark_angiogenesis.png")
+if (!is.null(plot_egfr)) save_plot(plot_egfr, "06_violin_EGFR_status.png", w=5, h=5)
+
+# A compact PDF with the three key panels for slides
+key_panels <- wrap_plots(p_feature, p_violin, p_bar, ncol = 2)
+ ggsave(file.path(out_dir, "00_key_panels_compact.pdf"), key_panels, width = 10, height = 8, dpi = 300)
+```
+
+## 9) Export summaries
+
+```{r}
+# 9) Export summaries -----------------------------------------
+msg("Exporting summaries (per-celltype means) ...")
+write.table(group_means, file = file.path(out_dir, "summary_mean_by_celltype.tsv"), sep = "\t", row.names = FALSE, quote = FALSE)
+
+# Optional: export per-cell scores (can be large)
+percell <- obj@meta.data |>
+  transmute(cell = rownames(obj@meta.data), .celltype = .data[[celltype_col]], IntersectSig1 = .data[["IntersectSig1"]],
+            HALLMARK_ANGIOGENESIS1 = .data[["HALLMARK_ANGIOGENESIS1"]])
+write.table(percell, file = file.path(out_dir, "percell_scores.tsv"), sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+## 10) Save updated object
+
+```{r}
+# 10) Save updated object -------------------------------------
+msg("Saving updated Seurat object with scores...")
+saveRDS(obj, file = file.path(out_dir, "scRNA_with_intersect_scores.rds"))
+
+msg("DONE. Figures + tables are in %s", normalizePath(out_dir))
+```

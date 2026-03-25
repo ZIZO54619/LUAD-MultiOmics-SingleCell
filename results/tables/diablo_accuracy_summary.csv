@@ -1,0 +1,10 @@
+Component,Accuracy,Method
+1,0.95800817539948,WeightedPredict
+2,0.452380952380952,WeightedPredict
+3,0.862089732008431,WeightedPredict
+4,0.705194563890216,WeightedPredict
+1,0.772511801788932,MajorityVote
+1,0.974730583426236,AveragedPredict
+2,0.373015873015873,AveragedPredict
+3,0.86058416139717,AveragedPredict
+4,0.673873228221054,AveragedPredict

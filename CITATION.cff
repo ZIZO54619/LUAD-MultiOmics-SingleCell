@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use this repository, please cite it using the metadata below."
+title: "MODA: Integrative Multi-Omics Analysis of LUAD with Consensus Bulk-to-Single-Cell Interpretation"
+version: 0.1.0
+type: software
+authors:
+  - family-names: "Abdulaziz"
+date-released: 2026-03-25
+license: MIT
+abstract: >
+  Curated public packaging of a LUAD multi-omics workflow that integrates
+  matched bulk omics, clinical metadata, MOFA+, DIABLO, consensus signature
+  overlap, and scRNA localization.

@@ -1,0 +1,10 @@
+# Copy this file to config/paths.yml and replace the placeholder values
+# with the local locations of your external data assets.
+
+external_project_dir: "D:/path/to/local/MODA/project"
+external_raw_dir: "D:/path/to/local/MODA/project/data/raw"
+external_processed_dir: "D:/path/to/local/MODA/project/data/processed"
+external_results_dir: "D:/path/to/local/MODA/project/results"
+external_scRNA_object: "D:/path/to/lung_adenocarcinoma_scRNA.rds"
+external_mofa_gene_lists_dir: "D:/path/to/MOFA_biomarkers/gene_lists_SYMBOL_biomart"
+public_signature_file: "results/signatures/intersection_rna_factor1_genes.txt"

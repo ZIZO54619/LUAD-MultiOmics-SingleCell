@@ -1,0 +1,9 @@
+variable,n_levels,min_prop,missing_pct
+tissue_type_0nat_1tumor,2,0.4959349593495935,0
+type,2,0.4959349593495935,0
+luad_cohort,2,0.45257452574525747,0
+gender_0female_1male,2,0.3712737127371274,0
+nmf_prot_consensus,4,0.0948509485094851,0
+tp53_deletion_type,4,0.056910569105691054,0
+nmf_consensus,5,0.056910569105691054,0
+cdkn2a_deletion_type,5,0.051490514905149054,0

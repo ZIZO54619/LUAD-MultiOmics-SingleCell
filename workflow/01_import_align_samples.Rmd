@@ -1,0 +1,229 @@
+---
+title: "MODA • Step 01 — Import, ID Alignment & Common Samples"
+author: "Abdulaziz"
+date: "2025-09-14"
+output: html_document
+---
+
+### ===============================================================
+
+## Description:
+
+### This R Markdown script executes Step 01 of the MODA pipeline.
+
+### It imports and harmonizes multi-omics datasets, aligning all data layers
+
+### (RNA, Proteome, Phospho, Methylation, miRNA, Acetylation) to a common
+
+### set of valid samples for consistent downstream analyses.
+
+## Key Functions:
+
+### • Automatically detect and read raw omics data files.
+
+### • Standardize feature and sample identifiers.
+
+### • Identify common samples across all omics layers.
+
+### • Save aligned matrices as both Parquet and RDS for efficiency.
+
+### • Generate summary statistics and QC plots.
+
+### • Perform acceptance checks to validate data alignment.
+
+# 
+
+## Outputs:
+
+### • Processed omics data saved in: /data/processed/<layer>/
+
+### • Common sample list: common_samples.rds
+
+### • HTML report with summaries, plots, and QC metrics.
+
+# 
+
+## Summary:
+
+### Provides a unified, analysis-ready dataset ensuring sample consistency
+
+### across all omics modalities.
+
+### ==============================================================
+
+```{r}
+# ===== 0) Package Setup =====
+need <- c("tidyverse", "data.table", "janitor", "arrow", "ggpubr", "stringr")
+inst <- need[!need %in% installed.packages()[, 1]]
+if (length(inst)) install.packages(inst, repos = "https://cloud.r-project.org")
+
+
+suppressPackageStartupMessages({
+library(tidyverse)
+library(data.table)
+library(janitor)
+library(arrow)
+library(ggpubr)
+library(stringr)
+})
+
+```
+
+```{r}
+# ===== 1) Project Paths =====
+source("R/workflow_utils.R")
+cfg <- load_moda_paths()
+base_dir <- cfg$external_project_dir
+raw_dir <- cfg$external_raw_dir
+proc_dir <- cfg$external_processed_dir
+if (!dir.exists(raw_dir)) stop("Raw omics directory not found. Update config/paths.yml.")
+if (!nzchar(proc_dir)) stop("Processed data directory is not configured. Update config/paths.yml.")
+dir.create(proc_dir, showWarnings = FALSE, recursive = TRUE)
+
+
+# Helper functions
+standardize_ids <- function(x) {
+x <- toupper(x)
+x <- gsub("\\s+", "", x) # Remove spaces
+x <- gsub("[^A-Z0-9_-]", "", x) # Allow only A-Z, 0-9, _ and -
+x
+}
+
+
+save_matrix_parquet <- function(m, out_path) {
+df <- as.data.frame(m) %>% tibble::rownames_to_column("feature_id")
+arrow::write_parquet(df, out_path)
+}
+
+
+# Flexible reader for *.cct.txt / *.txt files (detects first Feature/Gene column)
+read_cct_matrix <- function(path) {
+dt <- data.table::fread(path, check.names = FALSE)
+
+# Guess feature column from known candidates
+candidates <- c("GeneSymbol", "Gene", "SYMBOL", "Feature", "Protein", "ProteinID",
+"miRNA", "miRNA_ID", "ID", "Accession")
+rid <- if (length(intersect(candidates, names(dt)))) intersect(candidates, names(dt))[1] else names(dt)[1]
+rn <- dt[[rid]]
+drop_cols <- unique(c(rid, grep("(?i)desc|name|uniprot|protein.*name", names(dt), value = TRUE)))
+
+# Remaining columns are samples
+mat_df <- dt[, setdiff(names(dt), drop_cols), with = FALSE]
+
+# Force numeric conversion
+mat <- as.matrix(sapply(mat_df, as.numeric))
+rownames(mat) <- rn
+list(mat = mat, rid = rid, samples = colnames(mat))
+}
+
+
+```
+
+```{r}
+# ===== 2) Auto-detect file names from the raw directory =====
+pick <- function(pattern)
+  list.files(raw_dir, pattern = pattern, full.names = TRUE, ignore.case = TRUE)[1]
+
+paths <- list(
+  clinical = pick("^Clinical.*\\.txt$|\\.tsi\\.txt$"),
+  rna      = pick("RNAseq.*TPM.*\\.cct(\\.txt)?$"),
+  proteome = pick("proteome.*TumorNormal.*\\.cct(\\.txt)?$"),
+  phospho  = pick("phospho.*geneLevel.*\\.cct(\\.txt)?$"),
+  methyl   = pick("Methylation.*Gene.*\\.cct(\\.txt)?$"),
+  mirna    = pick("microRNA.*RPM.*\\.cct(\\.txt)?$"),
+  acetyl   = pick("acetylome.*geneLevel.*\\.cct(\\.txt)?$")
+)
+
+paths
+```
+
+```{r}
+layers_to_read <- c("rna", "proteome", "phospho", "methyl", "mirna", "acetyl") # Main six layers
+
+read_one <- function(p) {
+  stopifnot(!is.na(p), file.exists(p))
+  x <- read_cct_matrix(p)
+  colnames(x$mat) <- standardize_ids(colnames(x$mat))
+  x
+}
+
+objs <- lapply(paths[layers_to_read], read_one)
+names(objs) <- layers_to_read
+
+# Quick summary of loaded files
+layer_summary <- tibble(
+  layer          = names(objs),
+  file           = unname(unlist(paths[layers_to_read])),
+  feature_id_col = sapply(objs, `[[`, "rid"),
+  n_features     = sapply(objs, function(z) nrow(z$mat)),
+  n_samples      = sapply(objs, function(z) ncol(z$mat))
+) %>% arrange(layer)
+
+layer_summary %>% knitr::kable(caption = "Summary of layers after import")
+
+```
+
+```{r}
+# Identify common samples across all layers
+samples_per_layer <- lapply(objs, function(z) colnames(z$mat))
+common_samples <- Reduce(intersect, samples_per_layer)
+
+# Count number of common samples
+common_n <- length(common_samples)
+common_n
+```
+
+```{r}
+# Plot the number of samples per layer
+p_counts <- layer_summary %>%
+  ggplot(aes(x = reorder(layer, n_samples), y = n_samples)) +
+  geom_col() +
+  geom_hline(yintercept = common_n, linetype = 2) +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Number of Samples",
+    title = "Number of Samples per Layer",
+    subtitle = sprintf("Common samples across all layers = %d", common_n)
+  )
+
+p_counts
+
+```
+
+```{r}
+# Display the first 20 common samples for quick review
+tibble(sample_id = head(sort(common_samples), 20)) %>%
+knitr::kable(caption = "First 20 common samples (quick review)")
+```
+
+```{r}
+# Align all matrices to common samples
+aligned <- lapply(objs, function(z) z$mat[, common_samples, drop = FALSE])
+
+# Create directories for each omics layer
+for (nm in names(aligned)) {
+  dir.create(file.path(proc_dir, nm), showWarnings = FALSE, recursive = TRUE)
+}
+
+# Save matrices as Parquet and RDS (efficient and convenient)
+mapply(function(m, nm) {
+  out_parquet <- file.path(proc_dir, nm, paste0(nm, ".parquet"))
+  out_rds     <- file.path(proc_dir, nm, paste0(nm, ".rds"))
+  save_matrix_parquet(m, out_parquet)
+  saveRDS(m, out_rds)
+}, aligned, names(aligned))
+
+# Save the list of common samples for later use
+saveRDS(common_samples, file.path(proc_dir, "common_samples.rds"))
+
+# Simple acceptance table
+accept <- tibble(
+  check  = c("Equal number of samples across matrices", "Number of common samples ≥ 250"),
+  result = c(length(unique(sapply(aligned, ncol))) == 1, common_n >= 250),
+  value  = c(unique(sapply(aligned, ncol))[1], common_n)
+)
+
+accept %>%
+  knitr::kable(caption = "Acceptance Checks — Step 01")
+```

@@ -1,0 +1,46 @@
+# Local configuration
+config/paths.yml
+
+# R session files
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# Rendered notebook outputs
+workflow/*.html
+workflow/*_files/
+
+# Runtime outputs
+results/runtime_*/
+results/tmp/
+
+# Large binaries and private data
+*.rds
+*.parquet
+*.csv.gz
+*.cct
+*.cct.txt
+*.7z
+*.zip
+*.rar
+*.gz
+
+# Private or external data mirrors
+data/raw/
+data/processed/
+data/scRNA/
+external/
+
+# Legacy workspace folders that must stay out of the public repo
+project/
+MOFA/
+DIABLO/
+Intersection/
+scRNA/
+Code of Modules/
+MODA Project _code_/
+
+# Operating system noise
+Thumbs.db
+Desktop.ini

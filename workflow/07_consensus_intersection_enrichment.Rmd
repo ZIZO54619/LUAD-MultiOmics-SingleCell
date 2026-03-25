@@ -1,0 +1,148 @@
+---
+title: "MODA - Step 07 - Consensus Intersection and Enrichment"
+author: "Abdulaziz"
+date: "2025-10-17"
+output: html_document
+---
+
+
+## Setup
+
+```{r}
+# ==========================================================
+#          MOFA × DIABLO RNA INTERSECTION + ENRICHMENT
+# ==========================================================
+suppressPackageStartupMessages({
+  library(data.table)
+  library(dplyr)
+  library(stringr)
+  library(clusterProfiler)
+  library(ReactomePA)
+  library(org.Hs.eg.db)
+  library(ggplot2)
+})
+```
+
+## 1️⃣ إعداد المسارات
+
+```{r}
+source("R/workflow_utils.R")
+cfg <- load_moda_paths()
+base_dir  <- cfg$external_project_dir
+mofa_dir  <- cfg$external_mofa_gene_lists_dir
+results_root <- if (nzchar(cfg$external_results_dir)) cfg$external_results_dir else file.path(base_dir, "results")
+diablo_res <- file.path(results_root, "diablo")
+out_dir   <- file.path(diablo_res, "intersections"); dir.create(out_dir, TRUE, FALSE)
+if (!dir.exists(mofa_dir)) stop("MOFA gene-list directory not found. Update config/paths.yml.")
+if (!dir.exists(diablo_res)) stop("DIABLO results directory not found. Update config/paths.yml.")
+```
+
+## 2️⃣ تحميل قوائم الجينات من MOFA (SYMBOL)
+
+```{r}
+mofa_files <- list.files(mofa_dir, pattern="genes_Factor.*_RNA\\.txt$", full.names=TRUE)
+mofa_lists <- lapply(mofa_files, function(f) toupper(trimws(readLines(f))))
+names(mofa_lists) <- gsub("\\.txt$","", basename(mofa_files))
+cat("Loaded", length(mofa_lists), "MOFA RNA lists\n")
+```
+
+## 3️⃣ تحميل جينات DIABLO (RNA block)
+
+```{r}
+rna_file <- file.path(diablo_res, "DIABLO_sel_RNA.csv")
+if (!file.exists(rna_file)) stop("❌ الملف DIABLO_sel_RNA.csv غير موجود في ", diablo_res)
+rna_sel <- fread(rna_file)
+rna_genes <- unique(toupper(trimws(rna_sel$feature)))
+cat("Loaded DIABLO RNA block with", length(rna_genes), "unique features\n")
+```
+
+## 4️⃣ حساب التقاطع MOFA × DIABLO (RNA فقط)
+
+```{r}
+intersections <- list()
+for (mfn in names(mofa_lists)) {
+  mgenes <- mofa_lists[[mfn]]
+  int <- intersect(rna_genes, mgenes)
+  intersections[[mfn]] <- int
+  cat("\n", mfn, ":", length(int), "genes in intersection\n")
+  outf <- file.path(out_dir, paste0("INTERSECTION_RNA_", mfn, ".txt"))
+  writeLines(int, outf)
+}
+```
+
+## تلخيص النتائج
+
+```{r}
+sum_tab <- tibble(
+  mofa_file = names(intersections),
+  n_genes = sapply(intersections, length)
+)
+fwrite(sum_tab, file.path(out_dir, "intersection_counts_RNA.tsv"))
+cat("\n✅ Saved RNA intersection summary ->", file.path(out_dir, "intersection_counts_RNA.tsv"), "\n")
+```
+
+## 5️⃣ اختيار قائمة الجينات النشطة وكتابة ملف موحد
+
+```{r}
+genes <- unique(unlist(intersections))
+genes <- genes[genes != ""]
+cat("Total unique intersected genes:", length(genes), "\n")
+writeLines(genes, file.path(out_dir, "INTERSECT_RNA_genes_all.txt"))
+```
+
+## 6️⃣ Enrichment: تحويل SYMBOL → ENTREZ
+
+```{r}
+gene_map <- bitr(genes, fromType="SYMBOL", toType="ENTREZID", OrgDb=org.Hs.eg.db)
+entrez_genes <- unique(gene_map$ENTREZID)
+cat("Mapped", length(entrez_genes), "genes to Entrez IDs\n")
+```
+
+## Enrichment: GO Biological Process
+
+```{r}
+ego <- enrichGO(
+  gene          = entrez_genes,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "ENTREZID",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+pdf(file.path(out_dir, "enrichGO_dotplot.pdf"), width=7, height=5)
+dotplot(ego, showCategory=20, title="GO Biological Processes (MOFA×DIABLO RNA Intersection)")
+dev.off()
+```
+
+## Enrichment: Reactome Pathways
+
+```{r}
+er <- enrichPathway(
+  gene          = entrez_genes,
+  organism      = "human",
+  pvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+pdf(file.path(out_dir, "Reactome_Pathways_dotplot.pdf"), width=7, height=5)
+dotplot(er, showCategory=20, title="Reactome Pathways (MOFA×DIABLO RNA Intersection)")
+dev.off()
+```
+
+## حفظ جداول النتائج
+
+```{r}
+if (!is.null(ego))  fwrite(as.data.frame(ego), file.path(out_dir, "GO_enrichment_results.tsv"), sep="\t")
+if (!is.null(er))   fwrite(as.data.frame(er),  file.path(out_dir, "Reactome_enrichment_results.tsv"), sep="\t")
+cat("\n✅ Enrichment results saved to:", out_dir, "\n")
+```
+
+## 7️⃣ ملخص نصي سريع
+
+```{r}
+cat("\nTop enriched GO terms:\n")
+if (!is.null(ego)) print(head(ego@result[,c("Description","p.adjust")], 10))
+
+cat("\nTop enriched Reactome pathways:\n")
+if (!is.null(er)) print(head(er@result[,c("Description","p.adjust")], 10))
+```
