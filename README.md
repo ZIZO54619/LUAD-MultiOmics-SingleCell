@@ -7,7 +7,7 @@ Public-facing multi-omics LUAD workflow integrating matched bulk omics, latent f
 ## Project overview figure
 
 <p align="center">
-  <img src="docs/graphical_abstract.png" alt="Graphical abstract summarizing the LUAD multi-omics integration workflow from matched bulk omics to consensus signatures and single-cell localization" width="100%">
+  <img src="docs/graphical abstract .png" alt="Graphical abstract summarizing the LUAD multi-omics integration workflow from matched bulk omics to consensus signatures and single-cell localization" width="100%">
 </p>
 
 ---
