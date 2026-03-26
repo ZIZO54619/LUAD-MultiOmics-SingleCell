@@ -35,7 +35,7 @@ The goal is not to claim a clinically validated biomarker, but to present a **tr
 ## Project overview figure
 
 <p align="center">
-  <img src="docs/graphical_abstract.png" alt="Graphical abstract summarizing the LUAD multi-omics integration workflow from matched bulk omics to consensus signatures and single-cell localization" width="100%">
+  <img src="docs/graphical abstract .png" alt="Graphical abstract summarizing the LUAD multi-omics integration workflow from matched bulk omics to consensus signatures and single-cell localization" width="100%">
 </p>
 
 > Replace `docs/graphical_abstract.png` with the exact path of your uploaded overview figure.
