@@ -4,6 +4,24 @@ Public-facing multi-omics LUAD workflow integrating matched bulk omics, latent f
 
 ---
 
+## Project overview figure
+
+<p align="center">
+  <img src="docs/graphical_abstract.png" alt="Graphical abstract summarizing the LUAD multi-omics integration workflow from matched bulk omics to consensus signatures and single-cell localization" width="100%">
+</p>
+
+---
+
+## Interactive results report
+
+A browser-viewable HTML report summarizing the main analysis outputs and selected final results is available here:
+
+**[Open MODA Results Report](https://zizo54619.github.io/LUAD-MultiOmics-SingleCell/MODA_Results.html)**
+
+> Replace this link with your final GitHub Pages URL if your published path is different.
+
+---
+
 ## At a glance
 
 - **Disease context:** Lung adenocarcinoma (LUAD)
@@ -20,25 +38,10 @@ Public-facing multi-omics LUAD workflow integrating matched bulk omics, latent f
 
 If you are visiting this repository for the first time, start here:
 
-- [Project overview figure](#project-overview-figure)
-- [Interactive results report](docs/MODA_Results.html)
+- [Interactive results report](https://zizo54619.github.io/LUAD-MultiOmics-SingleCell/MODA_Results.html)
 - [Key results](#key-results)
 - [Data availability and public/private boundaries](#what-is-public-vs-private)
 - [How to run the workflow](#reproducibility--how-to-run)
-
-> 📊 **Results walkthrough:**  
-> A portable HTML report summarizing the main outputs is available here:  
-> **[Open MODA Results Report](docs/MODA_Results.html)**
-
-If GitHub does not render the HTML file in a convenient way, you can still download and open it locally in your browser.
-
----
-
-## Project overview figure
-
-<p align="center">
-  <img src="docs/graphical abstract .png" alt="Graphical abstract summarizing the LUAD multi-omics integration workflow from matched bulk omics to consensus signatures and single-cell localization" width="100%">
-</p>
 
 ---
 
