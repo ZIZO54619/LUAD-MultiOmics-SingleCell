@@ -4,12 +4,51 @@ Public-facing multi-omics LUAD workflow integrating matched bulk omics, latent f
 
 ---
 
+## At a glance
+
+- **Disease context:** Lung adenocarcinoma (LUAD)
+- **Core cohort:** 369 matched samples
+- **Tumor samples:** 186
+- **NAT samples:** 183
+- **Omics layers:** RNA-seq, miRNA, proteome, phosphoproteome, acetylome, methylation
+- **Main methods:** MOFA+, DIABLO, consensus intersection, Reactome enrichment, and scRNA-seq localization
+- **Main finding:** the strongest reproducible signal in the current public workflow is a **vascular/endothelial-associated microenvironmental program**
+
+---
+
+## What to look at first
+
+If you are visiting this repository for the first time, start here:
+
+- [Project overview figure](#project-overview-figure)
+- [Interactive results report](docs/MODA_Results.html)
+- [Key results](#key-results)
+- [Data availability and public/private boundaries](#what-is-public-vs-private)
+- [How to run the workflow](#reproducibility--how-to-run)
+
+> 📊 **Results walkthrough:**  
+> A portable HTML report summarizing the main outputs is available here:  
+> **[Open MODA Results Report](docs/MODA_Results.html)**
+
+If GitHub does not render the HTML file in a convenient way, you can still download and open it locally in your browser.
+
+---
+
+## Project overview figure
+
+<p align="center">
+  <img src="docs/graphical abstract .png" alt="Graphical abstract summarizing the LUAD multi-omics integration workflow from matched bulk omics to consensus signatures and single-cell localization" width="100%">
+</p>
+
+---
+
 ## Why this project matters
 
 Lung adenocarcinoma (LUAD) is biologically heterogeneous across molecular, clinical, and microenvironmental axes.  
 This project was designed to identify **robust biological programs that remain consistent across complementary multi-omics integration strategies**, then localize the dominant signal within single-cell RNA-seq data.
 
 Rather than presenting a single model in isolation, this repository combines:
+
 - matched bulk multi-omics integration
 - latent factor analysis
 - supervised signature discovery
@@ -20,37 +59,18 @@ The goal is not to claim a clinically validated biomarker, but to present a **tr
 
 ---
 
-## At a glance
-
-- **Disease context:** Lung adenocarcinoma (LUAD)
-- **Core cohort:** 369 matched samples
-- **Tumor samples:** 186
-- **NAT samples:** 183
-- **Omics layers:** RNA-seq, miRNA, proteome, phosphoproteome, acetylome, methylation
-- **Main methods:** MOFA+, DIABLO, consensus intersection, Reactome enrichment, scRNA-seq localization
-- **Main finding:** the strongest reproducible signal in the current public workflow is a **vascular/endothelial-associated microenvironmental program**
-
----
-
-## Project overview figure
-
-<p align="center">
-  <img src="docs/graphical abstract .png" alt="Graphical abstract summarizing the LUAD multi-omics integration workflow from matched bulk omics to consensus signatures and single-cell localization" width="100%">
-</p>
-
-
----
-
 ## Dataset / data source
 
 This repository is a **curated public packaging** of a larger notebook-driven LUAD analysis workspace.
 
 ### Cohort summary
+
 - **Matched all-layer cohort:** 369 samples
 - **Tumor:** 186
 - **Normal adjacent tissue (NAT):** 183
 
 ### Core omics layers
+
 - RNA-seq
 - miRNA
 - proteome
@@ -59,7 +79,8 @@ This repository is a **curated public packaging** of a larger notebook-driven LU
 - methylation
 
 ### Additional context
-Clinical annotations in the original workspace include subtype, genotype, immune labels, stage-related variables, and survival-related fields.
+
+Clinical annotations in the original workspace include genotype, subtype, immune labels, stage-related variables, and survival-related fields.
 
 ---
 
@@ -68,6 +89,7 @@ Clinical annotations in the original workspace include subtype, genotype, immune
 This section is especially important for reproducibility and scientific transparency.
 
 ### Public in this repository
+
 - canonical workflow notebooks
 - helper scripts
 - environment scaffolding
@@ -77,6 +99,7 @@ This section is especially important for reproducibility and scientific transpar
 - documentation describing external dependencies
 
 ### Not redistributed here
+
 - raw CPTAC/ICPC omics files
 - processed patient-level matrices
 - raw clinical sample-level tables
