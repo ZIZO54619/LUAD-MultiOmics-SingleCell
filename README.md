@@ -7,7 +7,7 @@ Public-facing multi-omics LUAD workflow integrating matched bulk omics, latent f
 ## Project overview figure
 
 <p align="center">
-  <img src="docs/graphical abstract .png" alt="Graphical abstract summarizing the LUAD multi-omics integration workflow from matched bulk omics to consensus signatures and single-cell localization" width="100%">
+  <img src="docs/assets/deck/graphical_abstract.png" alt="Graphical abstract summarizing the LUAD multi-omics integration workflow from matched bulk omics to consensus signatures and single-cell localization" width="100%">
 </p>
 
 ---
@@ -16,9 +16,8 @@ Public-facing multi-omics LUAD workflow integrating matched bulk omics, latent f
 
 A browser-viewable HTML report summarizing the main analysis outputs and selected final results is available here:
 
-**[Open MODA Results Report](https://zizo54619.github.io/LUAD-MultiOmics-SingleCell/MODA_Results.html)**
-
-> Replace this link with your final GitHub Pages URL if your published path is different.
+**[Open MODA Results Report (local file)](docs/MODA_Results.html)**  
+**[Open MODA Results Report (GitHub Pages)](https://zizo54619.github.io/LUAD-MultiOmics-SingleCell/MODA_Results.html)**
 
 ---
 
