@@ -41,8 +41,15 @@ if (!dir.exists(diablo_res)) stop("DIABLO results directory not found. Update co
 
 ```{r}
 mofa_files <- list.files(mofa_dir, pattern="genes_Factor.*_RNA\\.txt$", full.names=TRUE)
+if (!length(mofa_files)) {
+  stop("No MOFA RNA gene-list files found in ", mofa_dir,
+       ". Expected files matching: genes_Factor*_RNA.txt")
+}
 mofa_lists <- lapply(mofa_files, function(f) toupper(trimws(readLines(f))))
 names(mofa_lists) <- gsub("\\.txt$","", basename(mofa_files))
+if (!length(mofa_lists)) {
+  stop("MOFA RNA gene-list loading produced an empty list. Check input files in ", mofa_dir)
+}
 cat("Loaded", length(mofa_lists), "MOFA RNA lists\n")
 ```
 
@@ -86,6 +93,9 @@ cat("\n✅ Saved RNA intersection summary ->", file.path(out_dir, "intersection_
 ```{r}
 genes <- unique(unlist(intersections))
 genes <- genes[genes != ""]
+if (!length(genes)) {
+  stop("MOFA×DIABLO RNA intersection is empty. Cannot run enrichment on an empty gene set.")
+}
 cat("Total unique intersected genes:", length(genes), "\n")
 writeLines(genes, file.path(out_dir, "INTERSECT_RNA_genes_all.txt"))
 ```

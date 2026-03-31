@@ -97,8 +97,11 @@ library(reticulate)
 # Display current Python configuration
 py_config()
 
-# Specify Python path for reticulate
-use_python("C:/Users/Abdulaziz/AppData/Local/R/cache/R/reticulate/uv/cache/archive-v0/rgscnchdk2HTReaGVTqRn/Scripts/python.exe", required = TRUE)
+# Optional: allow an explicit Python interpreter via environment variable
+python_bin <- Sys.getenv("MODA_PYTHON", unset = "")
+if (nzchar(python_bin)) {
+  use_python(python_bin, required = TRUE)
+}
 
 # Verify that the 'mofapy2' Python module is available
 stopifnot(py_module_available("mofapy2"))
@@ -1298,5 +1301,4 @@ ggsave(file.path(outdir, "counts_per_view_per_factor.pdf"), p, width = 9, height
 # - MOFA_biomarkers/counts_per_view_per_factor.pdf        (Visualization summary)
 
 ```
-
 
