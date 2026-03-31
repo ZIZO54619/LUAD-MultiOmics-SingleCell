@@ -19,6 +19,8 @@ A browser-viewable HTML report summarizing the main analysis outputs and selecte
 **[Open MODA Results Report](https://zizo54619.github.io/LUAD-MultiOmics-SingleCell/docs/MODA_Results.html)**
 
 
+**[Open MODA Results Report (GitHub Pages)](https://zizo54619.github.io/LUAD-MultiOmics-SingleCell/MODA_Results.html)**
+
 ---
 
 ## At a glance
