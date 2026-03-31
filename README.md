@@ -7,7 +7,7 @@ Public-facing multi-omics LUAD workflow integrating matched bulk omics, latent f
 ## Project overview figure
 
 <p align="center">
-  <img src="docs/graphical abstract .png" alt="Graphical abstract summarizing the LUAD multi-omics integration workflow from matched bulk omics to consensus signatures and single-cell localization" width="100%">
+  <img src="docs/assets/deck/graphical_abstract.png" alt="Graphical abstract summarizing the LUAD multi-omics integration workflow from matched bulk omics to consensus signatures and single-cell localization" width="100%">
 </p>
 
 ---
@@ -16,9 +16,8 @@ Public-facing multi-omics LUAD workflow integrating matched bulk omics, latent f
 
 A browser-viewable HTML report summarizing the main analysis outputs and selected final results is available here:
 
-**[Open MODA Results Report](https://zizo54619.github.io/LUAD-MultiOmics-SingleCell/MODA_Results.html)**
+**[Open MODA Results Report](https://zizo54619.github.io/LUAD-MultiOmics-SingleCell/docs/MODA_Results.html)**
 
-> Replace this link with your final GitHub Pages URL if your published path is different.
 
 ---
 
@@ -38,7 +37,7 @@ A browser-viewable HTML report summarizing the main analysis outputs and selecte
 
 If you are visiting this repository for the first time, start here:
 
-- [Interactive results report](https://zizo54619.github.io/LUAD-MultiOmics-SingleCell/MODA_Results.html)
+- [Interactive results report](https://zizo54619.github.io/LUAD-MultiOmics-SingleCell/docs/MODA_Results.html)
 - [Key results](#key-results)
 - [Data availability and public/private boundaries](#what-is-public-vs-private)
 - [How to run the workflow](#reproducibility--how-to-run)

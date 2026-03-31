@@ -65,7 +65,12 @@ rownames(meta) <- meta[[sample_col]]
 if (!"sample" %in% names(meta)) meta$sample <- meta[[sample_col]]
 
 # outcome column (e.g., EGFR mutation status)
-Y <- factor(meta$egfr_mutation_info)   # change column according to your target
+target_candidates <- c("egfr_mutation_info", "egfr_any_vs_wt", "egfr_classic_vs_other")
+target_col <- target_candidates[target_candidates %in% names(meta)][1]
+if (is.na(target_col)) {
+  stop("No EGFR target column found in metadata. Expected one of: ", paste(target_candidates, collapse = ", "))
+}
+Y <- factor(meta[[target_col]])
 ```
 
 
@@ -567,4 +572,3 @@ p <- p + scale_color_discrete(name = "Outcome", labels = auc_labels)
 
 # save plot
 ggsave(file.path(res_dir, "auroc_all_omics_combined.pdf"), p, width = 10, height = 8)
-

@@ -49,6 +49,20 @@ read_simple_yaml <- function(path) {
   out
 }
 
+is_absolute_path <- function(path) {
+  if (!nzchar(path)) {
+    return(FALSE)
+  }
+  grepl("^([A-Za-z]:[\\/]|/|~)", path)
+}
+
+resolve_repo_relative_path <- function(path, repo_root) {
+  if (!nzchar(path) || is_absolute_path(path)) {
+    return(path)
+  }
+  file.path(repo_root, path)
+}
+
 load_moda_paths <- function(config_path = NULL) {
   repo_root <- find_moda_repo_root()
   if (is.null(config_path)) {
@@ -74,6 +88,19 @@ load_moda_paths <- function(config_path = NULL) {
   merged <- setNames(vector("list", length(keys)), keys)
   for (key in keys) {
     merged[[key]] <- if (!is.null(config[[key]]) && nzchar(config[[key]])) config[[key]] else defaults[[key]]
+  }
+
+  path_like_keys <- c(
+    "external_project_dir",
+    "external_raw_dir",
+    "external_processed_dir",
+    "external_results_dir",
+    "external_scRNA_object",
+    "external_mofa_gene_lists_dir",
+    "public_signature_file"
+  )
+  for (key in intersect(path_like_keys, names(merged))) {
+    merged[[key]] <- resolve_repo_relative_path(merged[[key]], repo_root)
   }
 
   if (!nzchar(merged$external_raw_dir) && nzchar(merged$external_project_dir)) {
