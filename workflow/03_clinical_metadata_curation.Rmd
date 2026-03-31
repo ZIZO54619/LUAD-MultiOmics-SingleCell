@@ -201,8 +201,8 @@ kable(head(num_dict[order(num_dict$missing_rate, -num_dict$unique_non_na), ], 20
 # meta خفيفة: (sample_id + shortlist columns + batch/type لو موجودين)
 keep_cols <- unique(c("sample_id","type","batch", shortlist$name))
 meta <- clinical[, intersect(keep_cols, names(clinical)), drop=FALSE]
-saveRDS(meta, file.path(proc_dir, "clinical", "meta_shortlist.rds"))
 if(!dir.exists(file.path(proc_dir,"clinical"))) dir.create(file.path(proc_dir,"clinical"), recursive = TRUE)
+saveRDS(meta, file.path(proc_dir, "clinical", "meta_shortlist.rds"))
 arrow::write_parquet(as.data.frame(meta), file.path(proc_dir, "clinical", "meta_shortlist.parquet"))
 
 # كمان نحفظ الدكشنري
@@ -488,6 +488,5 @@ arrow::write_parquet(as.data.frame(meta), file.path(proc_dir, "clinical", "meta_
 ```{r}
 
 ```
-
 
 

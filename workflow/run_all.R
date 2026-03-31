@@ -14,6 +14,15 @@ workflow_files <- c(
   "workflow/08_scrna_signature_localization.Rmd"
 )
 
+missing_workflow_files <- workflow_files[!file.exists(workflow_files)]
+if (length(missing_workflow_files)) {
+  stop(
+    "The following workflow files are missing:\n",
+    paste0(" - ", missing_workflow_files, collapse = "\n"),
+    "\nEnsure you are running from an intact repository checkout."
+  )
+}
+
 if (!requireNamespace("rmarkdown", quietly = TRUE)) {
   install.packages("rmarkdown", repos = "https://cloud.r-project.org")
 }

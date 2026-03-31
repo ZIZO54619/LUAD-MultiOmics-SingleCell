@@ -16,6 +16,7 @@ Public-facing multi-omics LUAD workflow integrating matched bulk omics, latent f
 
 A browser-viewable HTML report summarizing the main analysis outputs and selected final results is available here:
 
+
 **[Open MODA Results Report (GitHub Pages)](https://zizo54619.github.io/LUAD-MultiOmics-SingleCell/MODA_Results.html)**
 
 ---
@@ -36,7 +37,7 @@ A browser-viewable HTML report summarizing the main analysis outputs and selecte
 
 If you are visiting this repository for the first time, start here:
 
-- [Interactive results report](https://zizo54619.github.io/LUAD-MultiOmics-SingleCell/MODA_Results.html)
+- [Interactive results report](https://zizo54619.github.io/LUAD-MultiOmics-SingleCell/docs/MODA_Results.html)
 - [Key results](#key-results)
 - [Data availability and public/private boundaries](#what-is-public-vs-private)
 - [How to run the workflow](#reproducibility--how-to-run)
