@@ -159,6 +159,10 @@ cs <- std_ids(common_samples)
 # ===== 4) Load Clinical Metadata =====
 clin_path <- list.files(file.path(base_dir, "data", "raw"),
                         pattern = "(?i)^Clinical.*\\.txt$|\\.tsi\\.txt$", full.names = TRUE)[1]
+if (is.na(clin_path) || !nzchar(clin_path) || !file.exists(clin_path)) {
+  stop("Clinical metadata file not found under ", file.path(base_dir, "data", "raw"),
+       ". Expected a file matching ^Clinical.*\\.txt$ or \\.tsi\\.txt$")
+}
 
 clinical <- data.table::fread(clin_path, data.table = FALSE)
 names(clinical) <- janitor::make_clean_names(names(clinical))

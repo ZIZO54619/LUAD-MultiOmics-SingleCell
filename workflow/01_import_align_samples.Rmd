@@ -89,6 +89,31 @@ x <- gsub("[^A-Z0-9_-]", "", x) # Allow only A-Z, 0-9, _ and -
 x
 }
 
+assert_no_id_collisions <- function(original_ids, normalized_ids, context = "sample IDs") {
+  df <- data.frame(
+    original = as.character(original_ids),
+    normalized = as.character(normalized_ids),
+    stringsAsFactors = FALSE
+  )
+  df <- df[!is.na(df$normalized) & nzchar(df$normalized), , drop = FALSE]
+  split_orig <- split(df$original, df$normalized)
+  collisions <- split_orig[vapply(split_orig, function(v) length(unique(v)) > 1, logical(1))]
+  if (length(collisions)) {
+    details <- vapply(
+      names(collisions),
+      function(k) paste0(k, " <= ", paste(unique(collisions[[k]]), collapse = " | ")),
+      character(1)
+    )
+    stop(
+      "ID normalization collision detected in ", context, ". ",
+      "Distinct original IDs map to the same normalized ID:\n - ",
+      paste(details, collapse = "\n - "),
+      "\nAdjust input IDs before continuing."
+    )
+  }
+  invisible(TRUE)
+}
+
 
 save_matrix_parquet <- function(m, out_path) {
 df <- as.data.frame(m) %>% tibble::rownames_to_column("feature_id")
@@ -121,8 +146,17 @@ list(mat = mat, rid = rid, samples = colnames(mat))
 
 ```{r}
 # ===== 2) Auto-detect file names from the raw directory =====
-pick <- function(pattern)
-  list.files(raw_dir, pattern = pattern, full.names = TRUE, ignore.case = TRUE)[1]
+pick <- function(pattern) {
+  matches <- list.files(raw_dir, pattern = pattern, full.names = TRUE, ignore.case = TRUE)
+  if (length(matches) != 1) {
+    stop(
+      "Expected exactly 1 file match for pattern ", pattern,
+      " in ", raw_dir, " but found ", length(matches), ".\n",
+      if (length(matches)) paste0("Matches:\n - ", paste(matches, collapse = "\n - ")) else "No matches found."
+    )
+  }
+  matches[1]
+}
 
 paths <- list(
   clinical = pick("^Clinical.*\\.txt$|\\.tsi\\.txt$"),
@@ -143,7 +177,10 @@ layers_to_read <- c("rna", "proteome", "phospho", "methyl", "mirna", "acetyl") #
 read_one <- function(p) {
   stopifnot(!is.na(p), file.exists(p))
   x <- read_cct_matrix(p)
-  colnames(x$mat) <- standardize_ids(colnames(x$mat))
+  orig_ids <- colnames(x$mat)
+  norm_ids <- standardize_ids(orig_ids)
+  assert_no_id_collisions(orig_ids, norm_ids, context = basename(p))
+  colnames(x$mat) <- norm_ids
   x
 }
 

@@ -69,7 +69,15 @@ volcano <- function(tt, title="Volcano", lfc=1, fdr=0.05){
 }
 
 run_limma <- function(m, group_vec){
-  g <- factor(group_vec); stopifnot(length(levels(g))==2)
+  g <- factor(group_vec)
+  if (length(levels(g)) != 2) {
+    grp_tab <- table(g, useNA = "ifany")
+    stop(
+      "run_limma requires exactly 2 groups, found ", length(levels(g)), ". ",
+      "Levels: ", paste(levels(g), collapse = ", "), ". ",
+      "Counts: ", paste(names(grp_tab), as.integer(grp_tab), sep = "=", collapse = ", ")
+    )
+  }
   design <- model.matrix(~0+g); colnames(design) <- levels(g)
   fit <- lmFit(m, design)
   cont <- makeContrasts(contrasts=paste0(levels(g)[2],"-",levels(g)[1]), levels=design)
@@ -299,4 +307,3 @@ pheatmap::pheatmap(scale(t(rna_gsva_h[top_var, , drop=FALSE])),
                    show_colnames=FALSE, main="RNA • GSVA Hallmarks (Top variable)")
 
 ```
-

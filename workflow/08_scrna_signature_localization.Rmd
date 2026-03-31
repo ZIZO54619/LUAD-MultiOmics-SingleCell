@@ -115,7 +115,8 @@ intersect_genes <- unique(na.omit(mapped))
 
 msg("Signature genes provided: %d | Found in object: %d", length(raw_genes), length(intersect_genes))
 if (length(intersect_genes) < 5) {
-  warning("Fewer than 5 genes from the signature were found in the object. Check gene symbol version/species.")
+  stop("Fewer than 5 genes from the signature were found in the object (", length(intersect_genes),
+       "). Aborting to avoid unstable module scoring. Check gene symbol version/species.")
 }
 ```
 
